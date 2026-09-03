@@ -24,6 +24,14 @@ export const config = {
   maxFileSizeMB: Number(process.env.MAX_FILE_SIZE_MB || 50),
   downloadDir: path.resolve(process.env.DOWNLOAD_DIR || "./downloads"),
   databasePath: path.resolve(process.env.DATABASE_PATH || "./data/bot.db"),
+  // YouTube bot-check bypass: cookies from a logged-in browser.
+  // Either point to a Netscape-format cookies file, or let yt-dlp read
+  // cookies directly from a browser (e.g. "chrome", "firefox", "edge").
+  cookiesPath: path.resolve(process.env.COOKIES_PATH || "./cookies.txt"),
+  cookiesFromBrowser: (process.env.COOKIES_FROM_BROWSER || "").trim(),
+  // TikTok fallback: when yt-dlp fails (IP blocks / API changes),
+  // resolve the video through a third-party API and download the mp4 directly.
+  tiktokFallback: (process.env.TIKTOK_FALLBACK || "true").toLowerCase() !== "false",
 };
 
 export function isAdmin(userId: number): boolean {

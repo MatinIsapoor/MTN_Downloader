@@ -145,6 +145,29 @@ telegram/
 - Install yt-dlp: https://github.com/yt-dlp/yt-dlp#installation
 - Or set `YT_DLP_PATH` in .env to full path
 
+**YouTube: "Sign in to confirm you're not a bot"**
+- YouTube requires a logged-in session for most videos when downloaded from a server.
+  The bot retries several player clients automatically, but without cookies many
+  videos will still fail. Fix (one-time setup):
+  1. On your PC, open Chrome/Firefox, go to `youtube.com` and log in.
+  2. Install the **"Get cookies.txt LOCALLY"** extension and export cookies for YouTube.
+  3. Save the file as `cookies.txt` in the bot folder (same folder as `.env`),
+     or set a custom path via `COOKIES_PATH` in `.env`. Never commit this file to git.
+  4. Restart the bot — startup logs will confirm `Cookies: using file ...`.
+  5. Refresh the cookies every few weeks (YouTube sessions expire).
+- Alternative (local PC only): set `COOKIES_FROM_BROWSER=chrome` (or `firefox`/`edge`)
+  in `.env` so yt-dlp reads cookies straight from your browser.
+
+**TikTok: "blocked" / "Unexpected response from webpage"**
+- TikTok aggressively blocks server IPs and changes its API. The bot now:
+  1. retries yt-dlp with browser impersonation, then
+  2. automatically falls back to resolving the mp4 via a third-party API
+     (disable with `TIKTOK_FALLBACK=false`).
+- If it still fails, the video is likely private/deleted, or TikTok is blocking
+  the server's network — try again later or try another link.
+- Keep `yt-dlp` up to date (`yt-dlp -U`), TikTok breakages are often fixed upstream
+  within days.
+
 **"Unsupported URL"**
 - Ensure the video is public
 - Check the URL is correct

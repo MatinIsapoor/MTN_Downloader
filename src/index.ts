@@ -11,7 +11,7 @@ import {
   setFindWaiting,
   handleFindText,
 } from "./bot/handlers/admin";
-import { cleanupOldFiles } from "./services/downloader";
+import { cleanupOldFiles, logDownloaderDiagnostics } from "./services/downloader";
 
 async function main() {
   console.log("🚀 Starting Telegram Downloader Bot...");
@@ -19,6 +19,9 @@ async function main() {
   // Initialize database (async for sql.js)
   await initDatabase();
   console.log("✅ Database initialized");
+
+  // Downloader health: yt-dlp version, cookies, JS runtime, fallbacks
+  logDownloaderDiagnostics();
 
   // Create bot
   const bot = new Telegraf<Context>(config.botToken);
@@ -85,11 +88,10 @@ async function main() {
   const isRender = !!process.env.RENDER_EXTERNAL_URL;
 
   if (isRender) {
-    // در Render: از Webhook استفاده کن
-    const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
-    await bot.telegram.setWebhook(WEBHOOK_URL);
-    console.log(`✅ Webhook تنظیم شد: ${WEBHOOK_URL}`);
-    await bot.startWebhook('/webhook', null, PORT);
+    // در Render: از Webhook استفاده کن (public launch API; startWebhook is private)
+    const domain = process.env.RENDER_EXTERNAL_URL as string;
+    await bot.launch({ webhook: { domain, path: "/webhook", port: PORT } });
+    console.log(`✅ Webhook تنظیم شد: ${domain}/webhook`);
     console.log(`🚀 ربات روی پورت ${PORT} در حال اجراست!`);
   } else {
     // در محیط محلی (کامپیوتر خودتان): از Polling استفاده کن
