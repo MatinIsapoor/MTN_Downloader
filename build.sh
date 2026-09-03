@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# نصب yt-dlp با استفاده از pip (پایتون)
+# نصب و به‌روزرسانی yt-dlp
 echo "Installing yt-dlp..."
 pip install --upgrade yt-dlp
 
