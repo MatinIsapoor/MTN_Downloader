@@ -80,8 +80,22 @@ async function main() {
   }, 60 * 60 * 1000);
 
   // Start bot
-  await bot.launch();
-  console.log("✅ Bot is running!");
+    // Start bot with Webhook (for Render) or Polling (for local)
+  const PORT = parseInt(process.env.PORT || '3000', 10);
+  const isRender = !!process.env.RENDER_EXTERNAL_URL;
+
+  if (isRender) {
+    // در Render: از Webhook استفاده کن
+    const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
+    await bot.telegram.setWebhook(WEBHOOK_URL);
+    console.log(`✅ Webhook تنظیم شد: ${WEBHOOK_URL}`);
+    await bot.startWebhook('/webhook', null, PORT);
+    console.log(`🚀 ربات روی پورت ${PORT} در حال اجراست!`);
+  } else {
+    // در محیط محلی (کامپیوتر خودتان): از Polling استفاده کن
+    await bot.launch();
+    console.log("✅ Bot is running locally with polling!");
+  }
 
   // Graceful stop
   process.once("SIGINT", () => bot.stop("SIGINT"));
