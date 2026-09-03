@@ -56,7 +56,7 @@ export async function downloadVideo(
   const id = crypto.randomBytes(6).toString("hex");
   const template = path.join(config.downloadDir, `${id}_%(title).100s.%(ext)s`);
 
-  const args: string[] = [
+    const args: string[] = [
     "--no-playlist",
     "--no-warnings",
     "--merge-output-format",
@@ -69,6 +69,12 @@ export async function downloadVideo(
     template,
     "--no-mtime",
   ];
+
+  // 👇 اضافه کردن کوکی اگر فایل cookies.txt وجود داشته باشد
+  const cookiePath = path.join(process.cwd(), "cookies.txt");
+  if (fs.existsSync(cookiePath)) {
+    args.push("--cookies", cookiePath);
+  }
 
   // Platform-specific format selectors
   // YouTube DASH: video-only + audio-only streams → merge into one mp4 (needs ffmpeg)
@@ -83,7 +89,6 @@ export async function downloadVideo(
 
   // Use --print to get final file path
   args.push("--print", "after_move:filepath", url);
-
   return new Promise((resolve, reject) => {
     const proc = spawn(config.ytDlpPath, args, { shell: false });
     let stdout = "";
