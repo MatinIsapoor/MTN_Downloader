@@ -56,7 +56,7 @@ export async function downloadVideo(
   const id = crypto.randomBytes(6).toString("hex");
   const template = path.join(config.downloadDir, `${id}_%(title).100s.%(ext)s`);
 
-    const args: string[] = [
+     const args: string[] = [
     "--no-playlist",
     "--no-warnings",
     "--merge-output-format",
@@ -70,10 +70,13 @@ export async function downloadVideo(
     "--no-mtime",
   ];
 
-  // 👇 اضافه کردن کوکی اگر فایل cookies.txt وجود داشته باشد
+  // 👇 اضافه کردن کوکی با مسیر مطلق (Absolute Path)
   const cookiePath = path.join(process.cwd(), "cookies.txt");
   if (fs.existsSync(cookiePath)) {
     args.push("--cookies", cookiePath);
+    console.log(`✅ Using cookies from: ${cookiePath}`);
+  } else {
+    console.warn(`⚠️ Cookie file not found at: ${cookiePath}`);
   }
 
   // Platform-specific format selectors
