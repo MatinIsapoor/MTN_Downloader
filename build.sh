@@ -4,11 +4,11 @@
 echo "Updating pip..."
 pip install --upgrade pip
 
-# نصب و به‌روزرسانی yt-dlp به آخرین نسخه
-echo "Installing yt-dlp..."
-pip install --upgrade yt-dlp
+# نصب نسخه Nightly یت‌دی‌ال‌پی
+echo "Installing yt-dlp nightly..."
+pip install -U --pre "yt-dlp[default]"
 
-# نمایش نسخه‌ی نصب‌شده برای اطمینان
+# نمایش نسخه نصب شده برای اطمینان
 echo "yt-dlp version:"
 yt-dlp --version
 
