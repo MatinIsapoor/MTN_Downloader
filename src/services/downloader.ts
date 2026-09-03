@@ -80,6 +80,21 @@ function hasCookies(): boolean {
   }
 }
 
+/** Describe the cookie file so the admin can tell valid vs stale/missing at a glance. */
+function describeCookieFile(): string {
+  try {
+    const raw = fs.readFileSync(config.cookiesPath, "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"));
+    const yt = lines.filter((l) => l.includes("youtube.com")).length;
+    const kb = (fs.statSync(config.cookiesPath).size / 1024).toFixed(1);
+    if (lines.length === 0) return "file exists but has NO cookies (empty?) — re-export it";
+    if (yt === 0) return `${lines.length} cookies but NONE for youtube.com — export while logged in at youtube.com`;
+    return `${lines.length} cookies (${yt} for youtube.com, ${kb} KB)`;
+  } catch {
+    return "unreadable";
+  }
+}
+
 /** Log yt-dlp / cookies / runtime status at startup so the admin sees problems early. */
 export function logDownloaderDiagnostics(): void {
   const version = getYtDlpVersion();
@@ -97,7 +112,7 @@ export function logDownloaderDiagnostics(): void {
   if (config.cookiesFromBrowser) {
     console.log(`🔧 Cookies: reading from browser "${config.cookiesFromBrowser}"`);
   } else if (hasCookies()) {
-    console.log(`🔧 Cookies: using file ${config.cookiesPath}`);
+    console.log(`🔧 Cookies: using file ${config.cookiesPath} (${describeCookieFile()})`);
   } else {
     console.warn(
       `⚠️ No cookies configured (COOKIES_PATH=${config.cookiesPath} not found, COOKIES_FROM_BROWSER empty). ` +
@@ -106,8 +121,8 @@ export function logDownloaderDiagnostics(): void {
   }
   console.log(
     config.tiktokFallback
-      ? "🔧 TikTok fallback API: enabled"
-      : "🔧 TikTok fallback API: disabled (TIKTOK_FALLBACK=false)"
+      ? "🔧 TikTok fallback providers: enabled (tikwm x2 + ssstik)"
+      : "🔧 TikTok fallback providers: disabled (TIKTOK_FALLBACK=false)"
   );
 }
 
@@ -293,67 +308,113 @@ function sanitizeFileName(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
 
-/**
- * TikTok fallback: when yt-dlp is blocked (TikTok frequently blocks server IPs
- * or breaks the extractor with API changes), resolve the direct mp4 through
- * the tikwm API and download it with plain HTTPS.
- */
-async function downloadTikTokFallback(
-  url: string,
-  id: string,
-  onProgress?: (p: DownloadProgress) => void
-): Promise<DownloadResult> {
-  console.log("🎵 yt-dlp failed for TikTok, trying fallback API…");
-  const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`;
-  let info: any = null;
-  let apiError = "";
-  // Two attempts: the API occasionally drops a request.
-  for (let attempt = 1; attempt <= 2 && !info; attempt++) {
+/** Thrown when a provider confirms the video itself is gone — no point trying other providers. */
+class VideoNotFoundError extends Error {}
+
+interface TikTokResolved {
+  playUrl: string;
+  title?: string;
+  source: string;
+}
+
+const VIDEO_NOT_FOUND_MSG =
+  "❌ TikTok video not found. It may be private, deleted, or the link is wrong.";
+
+/** GET JSON with timeout + one retry for transient network blips. */
+async function fetchJson(url: string, headers: Record<string, string>, timeoutMs = 30000): Promise<any> {
+  let lastError = "";
+  for (let attempt = 1; attempt <= 2; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(apiUrl, {
-        headers: { "User-Agent": TIKTOK_UA },
-        signal: controller.signal,
-      });
-      if (!res.ok) throw new Error(`Fallback API HTTP ${res.status}`);
-      info = await res.json();
+      const res = await fetch(url, { headers, signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
     } catch (err: any) {
-      apiError = err?.name === "AbortError" ? "timed out" : (err?.message || String(err));
-      console.warn(`⚠️ TikTok fallback API attempt ${attempt} failed: ${apiError.slice(0, 120)}`);
+      lastError = err?.name === "AbortError" ? "timed out" : (err?.message || String(err));
+      console.warn(`⚠️ GET ${url.slice(0, 60)}… attempt ${attempt} failed: ${lastError.slice(0, 120)}`);
       if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
     } finally {
       clearTimeout(timeout);
     }
   }
-  if (!info) {
-    throw new Error("❌ TikTok fallback unreachable, please try again later.");
-  }
+  throw new Error(lastError || "request failed");
+}
 
+/** tikwm JSON API resolver (used with two independent hosts). */
+async function resolveViaTikwm(apiBase: string, videoUrl: string): Promise<TikTokResolved> {
+  const info = await fetchJson(
+    `${apiBase}/api/?url=${encodeURIComponent(videoUrl)}`,
+    { "User-Agent": TIKTOK_UA }
+  );
   if (info?.code !== 0 || !info?.data) {
-    const msg = String(info?.msg || "");
-    console.warn(`TikTok fallback API error: code=${info?.code} msg=${msg}`);
-    if (/pars/i.test(msg)) {
-      throw new Error("❌ TikTok video not found. It may be private, deleted, or the link is wrong.");
-    }
-    throw new Error(`❌ TikTok download failed (${msg || "fallback error"}). Try another link.`);
+    console.warn(`tikwm (${apiBase}) error: code=${info?.code} msg=${info?.msg}`);
+    // tikwm answers code != 0 for bad/deleted/private videos — other providers
+    // will fail the same way, so short-circuit with a clear message.
+    throw new VideoNotFoundError(VIDEO_NOT_FOUND_MSG);
   }
-
   // Prefer the no-watermark mp4, fall back to watermarked.
   const playUrl: string | undefined = info.data.play || info.data.wmplay;
-  if (!playUrl) throw new Error("❌ TikTok fallback returned no video URL. Try another link.");
+  if (!playUrl) throw new VideoNotFoundError(VIDEO_NOT_FOUND_MSG);
+  return { playUrl, title: info.data.title, source: `tikwm@${apiBase}` };
+}
 
-  const title: string | undefined = info.data.title;
-  const fileName = `${id}_${sanitizeFileName(title || "tiktok")}.mp4`;
-  const filePath = path.join(config.downloadDir, fileName);
-  const maxBytes = config.maxFileSizeMB * 1024 * 1024;
+/**
+ * ssstik.io resolver (fully independent provider).
+ * GET /en (grab s_tt token + cookies) → POST /abc?url=dl → parse download link.
+ */
+async function resolveViaSsstik(videoUrl: string): Promise<TikTokResolved> {
+  const pageRes = await fetch("https://ssstik.io/en", { headers: { "User-Agent": TIKTOK_UA } });
+  if (!pageRes.ok) throw new Error(`ssstik page HTTP ${pageRes.status}`);
+  const html = await pageRes.text();
+  const token = html.match(/s_tt\s*=\s*'([^']+)'/)?.[1];
+  if (!token) throw new Error("ssstik token not found (page layout changed?)");
+  const cookies = [...pageRes.headers.getSetCookie()].map((c) => c.split(";")[0]).join("; ");
 
-  const dlController = new AbortController();
-  const dlTimeout = setTimeout(() => dlController.abort(), 120000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  let resultHtml = "";
   try {
-    const res = await fetch(playUrl, {
-      headers: { "User-Agent": TIKTOK_UA, Referer: "https://www.tiktok.com/" },
-      signal: dlController.signal,
+    const res = await fetch("https://ssstik.io/abc?url=dl", {
+      method: "POST",
+      headers: {
+        "User-Agent": TIKTOK_UA,
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        Origin: "https://ssstik.io",
+        Referer: "https://ssstik.io/en",
+        Cookie: cookies,
+      },
+      body: new URLSearchParams({ id: videoUrl, locale: "en", tt: token }).toString(),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`ssstik resolve HTTP ${res.status}`);
+    resultHtml = await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+  // First https link is the no-watermark download.
+  const playUrl = [...resultHtml.matchAll(/href="(https:[^"]+)"/g)].map((m) => m[1])[0];
+  if (!playUrl) {
+    console.warn(`ssstik returned no download link (len=${resultHtml.length})`);
+    throw new VideoNotFoundError(VIDEO_NOT_FOUND_MSG);
+  }
+  return { playUrl, source: "ssstik" };
+}
+
+/** Stream a remote mp4 to disk with max-size enforcement. */
+async function downloadFileTo(
+  fileUrl: string,
+  filePath: string,
+  referer: string,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<void> {
+  const maxBytes = config.maxFileSizeMB * 1024 * 1024;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
+  try {
+    const res = await fetch(fileUrl, {
+      headers: { "User-Agent": TIKTOK_UA, Referer: referer },
+      signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error(`Video server HTTP ${res.status}`);
     const total = Number(res.headers.get("content-length") || 0);
@@ -381,10 +442,57 @@ async function downloadTikTokFallback(
   } catch (err: any) {
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
     if (err?.name === "AbortError") throw new Error("❌ TikTok download timed out. Please try again.");
-    throw err instanceof Error ? err : new Error(`❌ TikTok fallback download failed: ${err}`);
+    throw err instanceof Error ? err : new Error(`❌ TikTok download failed: ${err}`);
   } finally {
-    clearTimeout(dlTimeout);
+    clearTimeout(timeout);
   }
+}
+
+/**
+ * TikTok fallback: when yt-dlp is blocked (TikTok frequently blocks server IPs
+ * or breaks the extractor with API changes), resolve the direct mp4 through
+ * independent third-party providers and download it with plain HTTPS.
+ */
+async function downloadTikTokFallback(
+  url: string,
+  id: string,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<DownloadResult> {
+  console.log("🎵 yt-dlp failed for TikTok, trying fallback providers…");
+  const providers: Array<{ name: string; run: () => Promise<TikTokResolved> }> = [
+    { name: "tikwm.com", run: () => resolveViaTikwm("https://www.tikwm.com", url) },
+    { name: "tikwm-apex", run: () => resolveViaTikwm("https://tikwm.com", url) },
+    { name: "ssstik", run: () => resolveViaSsstik(url) },
+  ];
+
+  let resolved: TikTokResolved | null = null;
+  const failures: string[] = [];
+  for (const p of providers) {
+    try {
+      console.log(`🎵 TikTok fallback provider: ${p.name}…`);
+      resolved = await p.run();
+      console.log(`✅ TikTok resolved via ${resolved.source}`);
+      break;
+    } catch (err: any) {
+      // Video is gone, or a decisive error (e.g. too large) — don't hammer other providers.
+      if (err instanceof VideoNotFoundError || err?.message?.startsWith("❌")) throw err;
+      const msg = err?.message || String(err);
+      console.warn(`⚠️ TikTok provider ${p.name} failed: ${msg.slice(0, 150)}`);
+      failures.push(`${p.name}: ${msg.slice(0, 100)}`);
+    }
+  }
+
+  if (!resolved) {
+    console.error(`❌ All TikTok fallback providers failed: ${failures.join(" | ")}`);
+    throw new Error(
+      "❌ TikTok is unreachable right now (its anti-bot blocks this server's network on every route). " +
+      "Please try again in a few minutes or try another link."
+    );
+  }
+
+  const fileName = `${id}_${sanitizeFileName(resolved.title || "tiktok")}.mp4`;
+  const filePath = path.join(config.downloadDir, fileName);
+  await downloadFileTo(resolved.playUrl, filePath, "https://www.tiktok.com/", onProgress);
 
   const stat = fs.statSync(filePath);
   if (stat.size === 0) {
@@ -392,7 +500,7 @@ async function downloadTikTokFallback(
     throw new Error("❌ TikTok fallback returned an empty file. Try another link.");
   }
   console.log(`✅ TikTok fallback saved: ${fileName} (${(stat.size / 1048576).toFixed(1)} MB)`);
-  return { filePath, fileName, title, ext: "mp4", size: stat.size, platform: "tiktok" };
+  return { filePath, fileName, title: resolved.title, ext: "mp4", size: stat.size, platform: "tiktok" };
 }
 
 /** Map raw yt-dlp output to short, actionable user-facing errors. */
@@ -410,8 +518,21 @@ function mapDownloadError(msg: string, platform: string): Error {
     return new Error("❌ Requested format not available.");
   }
   if (platform === "youtube" && isYouTubeBotCheck(msg)) {
+    if (hasCookies()) {
+      // Cookies ARE configured, yet YouTube still rejects them: they are almost
+      // certainly expired (sessions die every few weeks) or were exported logged-out.
+      console.error(
+        `❌ YouTube bot-check hit DESPITE cookies (${describeCookieFile()}). ` +
+        `The cookies are expired/invalid — re-export fresh ones and restart the bot.`
+      );
+      return new Error(
+        "❌ YouTube still blocked this download — the saved cookies were rejected (expired or logged-out).\n\n" +
+        "🔧 Admin: re-export fresh cookies (log in at youtube.com first!), overwrite `cookies.txt`, " +
+        "and restart the bot. Sessions expire every few weeks, so this step repeats."
+      );
+    }
     console.error(
-      "❌ YouTube bot-check hit. Fix: put logged-in YouTube cookies in " +
+      "❌ YouTube bot-check hit with NO cookies configured. Fix: put logged-in YouTube cookies in " +
       `${config.cookiesPath} (Netscape format) or set COOKIES_FROM_BROWSER in .env, then restart.`
     );
     return new Error(

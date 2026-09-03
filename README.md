@@ -161,8 +161,9 @@ telegram/
 **TikTok: "blocked" / "Unexpected response from webpage"**
 - TikTok aggressively blocks server IPs and changes its API. The bot now:
   1. retries yt-dlp with browser impersonation, then
-  2. automatically falls back to resolving the mp4 via a third-party API
-     (disable with `TIKTOK_FALLBACK=false`).
+  2. automatically falls back to resolving the mp4 via independent third-party
+     providers (tikwm on two hosts, then ssstik) — if one is unreachable from
+     your network, the next is tried (disable with `TIKTOK_FALLBACK=false`).
 - If it still fails, the video is likely private/deleted, or TikTok is blocking
   the server's network — try again later or try another link.
 - Keep `yt-dlp` up to date (`yt-dlp -U`), TikTok breakages are often fixed upstream
