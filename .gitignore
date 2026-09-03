@@ -1,0 +1,9 @@
+node_modules
+dist
+downloads
+data
+.env
+*.db
+*.log
+ffmpeg.exe
+ffmpeg.zip

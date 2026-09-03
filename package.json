@@ -1,0 +1,23 @@
+{
+  "name": "telegram-downloader-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for downloading videos from TikTok, YouTube, X/Twitter, Instagram using yt-dlp",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "sql.js": "^1.11.0",
+    "dotenv": "^16.4.7",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}
