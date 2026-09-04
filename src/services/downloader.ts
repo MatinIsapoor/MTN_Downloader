@@ -14,6 +14,12 @@ export interface DownloadResult {
   platform: string;
 }
 
+export interface AudioResult {
+  filePath: string;
+  fileName: string;
+  size: number;
+}
+
 export interface DownloadProgress {
   percent?: number;
   speed?: string;
@@ -623,6 +629,83 @@ export function cleanupFile(filePath: string): void {
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   } catch {}
+}
+
+/** Resolve the ffmpeg binary: explicit FFMPEG_PATH file > local dir binary > PATH. */
+function getFfmpegBinary(): string {
+  const envPath = (process.env.FFMPEG_PATH || "").trim();
+  if (envPath) {
+    try {
+      const resolved = path.resolve(envPath);
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) return resolved;
+    } catch {}
+    // If FFMPEG_PATH points to something on PATH or is a dir, fall through.
+    if (!envPath.includes("/") && !envPath.includes("\\")) return envPath;
+  }
+  const localWin = path.join(config.ffmpegDir, "ffmpeg.exe");
+  const localNix = path.join(config.ffmpegDir, "ffmpeg");
+  try {
+    if (fs.existsSync(localWin)) return localWin;
+  } catch {}
+  try {
+    if (fs.existsSync(localNix)) return localNix;
+  } catch {}
+  return process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+}
+
+/**
+ * Extract the video's audio track to MP3 using ffmpeg.
+ * Returns the mp3 path. Throws if the video has no audio track or ffmpeg fails.
+ */
+export function extractAudio(videoPath: string): Promise<AudioResult> {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(videoPath)) {
+      return reject(new Error("Video file not found for audio extraction."));
+    }
+    const parsed = path.parse(videoPath);
+    const audioFileName = `${parsed.name}.mp3`;
+    const audioPath = path.join(parsed.dir, audioFileName);
+    try {
+      if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+    } catch {}
+
+    const ffmpeg = getFfmpegBinary();
+    const args = ["-y", "-i", videoPath, "-vn", "-c:a", "libmp3lame", "-q:a", "4", audioPath];
+    const proc = spawn(ffmpeg, args, { shell: false });
+    let stderr = "";
+
+    proc.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.stdout.on("data", () => {});
+
+    proc.on("error", (err) => {
+      reject(new Error(`Failed to run ffmpeg (${ffmpeg}): ${err.message}. Install ffmpeg: https://ffmpeg.org/download.html`));
+    });
+
+    proc.on("close", (code) => {
+      try {
+        if (code === 0 && fs.existsSync(audioPath)) {
+          const stat = fs.statSync(audioPath);
+          if (stat.size === 0) {
+            try { fs.unlinkSync(audioPath); } catch {}
+            return reject(new Error("⚠️ This video has no audio track, so no music file was created."));
+          }
+          console.log(`🎵 Audio extracted: ${audioFileName} (${(stat.size / 1048576).toFixed(2)} MB)`);
+          return resolve({ filePath: audioPath, fileName: audioFileName, size: stat.size });
+        }
+        try {
+          if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+        } catch {}
+        if (/does not contain any stream|Output file is empty|no audio/i.test(stderr)) {
+          return reject(new Error("⚠️ This video has no audio track, so no music file was created."));
+        }
+        reject(new Error(`Audio extraction failed (ffmpeg exit ${code}). ${stderr.slice(-300).trim()}`));
+      } catch (err: any) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  });
 }
 
 export function cleanupOldFiles(maxAgeHours = 2): void {

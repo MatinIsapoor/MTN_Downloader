@@ -1,6 +1,6 @@
 import { Telegraf, Context } from "telegraf";
 import { message } from "telegraf/filters";
-import { downloadVideo, cleanupFile } from "../../services/downloader";
+import { downloadVideo, extractAudio, cleanupFile } from "../../services/downloader";
 import { extractUrls, isSupportedUrl, detectPlatform, platformEmoji, formatBytes } from "../../utils/platform";
 import { recordDownload, getDownloadsByUser, getUserByTelegramId } from "../../database";
 import { Input } from "telegraf";
@@ -17,7 +17,7 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
         `▶️ YouTube (including Shorts)\n` +
         `🐦 X / Twitter\n` +
         `📸 Instagram (Reels, Posts, Stories if public)\n\n` +
-        `Just paste the URL and I'll download the video for you.\n\n` +
+        `Just paste the URL and I'll send you the video *plus its music* 🎬🎵\n\n` +
         `Commands:\n` +
         `/start - Show this message\n` +
         `/help - How to use\n` +
@@ -39,7 +39,7 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
       `ℹ️ *How to use:*\n\n` +
         `1\\. Just send any supported video link\n` +
         `2\\. Wait a few seconds while I download it\n` +
-        `3\\. Get the video file back in chat\n\n` +
+        `3\\. Get the video *and its music \\(MP3\\)* back in chat\n\n` +
         `*Supported platforms:*\n` +
         `• TikTok \\- \`tiktok\\.com\`\n` +
         `• YouTube \\- \`youtube\\.com\` / \`youtu\\.be\` \\(videos & shorts\\)\n` +
@@ -88,7 +88,7 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
   bot.action("user_help", async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.reply(
-      `ℹ️ Send me any TikTok, YouTube, X/Twitter or Instagram link and I'll download the video for you!`
+      `ℹ️ Send me any TikTok, YouTube, X/Twitter or Instagram link and I'll send you the video plus its music (MP3)!`
     );
   });
 
@@ -125,6 +125,8 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
 
     const platform = detectPlatform(url);
     let statusMsg: any;
+    // Track files so both video + extracted music are always cleaned up.
+    const tempFiles: string[] = [];
     try {
       statusMsg = await ctx.reply(`${platformEmoji(platform)} Downloading from *${platform}*… Please wait…`, {
         parse_mode: "Markdown",
@@ -147,6 +149,7 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
             .catch(() => {});
         }
       });
+      tempFiles.push(result.filePath);
 
       // Check file size vs Telegram limit (50MB for bots via sendVideo, but 2000MB with local API)
       // We'll attempt to send; if too large, inform user
@@ -160,6 +163,28 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
       const caption = `${platformEmoji(platform)} ${platform} video\n🔗 ${url}`;
       await ctx.replyWithVideo(Input.fromLocalFile(result.filePath, result.fileName), { caption });
 
+      // --- Music: extract the video's audio track and send it as MP3 ---
+      try {
+        await ctx.telegram
+          .editMessageText(ctx.chat.id, statusMsg.message_id, undefined, `🎵 Video sent! Extracting music…`)
+          .catch(() => {});
+        const audio = await extractAudio(result.filePath);
+        tempFiles.push(audio.filePath);
+        const audioCaption = `🎵 ${platform} music\n🔗 ${url}`;
+        await ctx.replyWithAudio(Input.fromLocalFile(audio.filePath, audio.fileName), {
+          caption: audioCaption,
+          title: result.title || `${platform} music`,
+        });
+      } catch (audioErr: any) {
+        const audioMsg = audioErr?.message || "Unknown audio error";
+        console.warn(`⚠️ Audio extraction failed for ${url}: ${audioMsg.slice(0, 200)}`);
+        // Only notify the user when it's informative (e.g. video truly has no
+        // audio). ffmpeg/install problems are already logged server-side.
+        if (String(audioMsg).includes("no audio track")) {
+          await ctx.reply("⚠️ This video has no audio track, so there's no music file to send.").catch(() => {});
+        }
+      }
+
       recordDownload({
         telegram_id: userId,
         url,
@@ -169,7 +194,6 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
       });
 
       await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      cleanupFile(result.filePath);
     } catch (err: any) {
       const msg = err?.message || "Unknown error";
       recordDownload({
@@ -188,6 +212,7 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
         await ctx.reply(msg).catch(() => {});
       }
     } finally {
+      for (const f of tempFiles) cleanupFile(f);
       processing.delete(userId);
     }
   });
