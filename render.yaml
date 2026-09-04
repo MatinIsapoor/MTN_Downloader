@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: telegram-downloader-bot
+    runtime: node
+    buildCommand: ./build.sh
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: YT_DLP_PATH
+        value: yt-dlp
+      - key: MAX_FILE_SIZE_MB
+        value: 50
+      # Self-ping interval (min). Stays under Render's ~15 min idle spin-down.
+      - key: KEEPALIVE_INTERVAL_MINUTES
+        value: 10

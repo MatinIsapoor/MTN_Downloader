@@ -12,6 +12,11 @@ import {
   handleFindText,
 } from "./bot/handlers/admin";
 import { cleanupOldFiles, logDownloaderDiagnostics } from "./services/downloader";
+import {
+  handleHealthRequest,
+  resolveKeepaliveConfig,
+  startSelfPing,
+} from "./services/keepalive";
 
 async function main() {
   console.log("🚀 Starting Telegram Downloader Bot...");
@@ -90,9 +95,34 @@ async function main() {
   if (isRender) {
     // در Render: از Webhook استفاده کن (public launch API; startWebhook is private)
     const domain = process.env.RENDER_EXTERNAL_URL as string;
-    await bot.launch({ webhook: { domain, path: "/webhook", port: PORT } });
+    await bot.launch({
+      webhook: {
+        domain,
+        path: "/webhook",
+        port: PORT,
+        // Telegraf calls this `cb` for any non-webhook request, so use it to
+        // answer Render / UptimeRobot health checks on the same PORT.
+        cb: (req, res) => {
+          if (handleHealthRequest(req, res)) return;
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Not found");
+        },
+      },
+    });
     console.log(`✅ Webhook تنظیم شد: ${domain}/webhook`);
     console.log(`🚀 ربات روی پورت ${PORT} در حال اجراست!`);
+    console.log(`🏓 Health check: ${domain}/health`);
+
+    // Self-ping generates inbound traffic every ~10 min, resetting Render's
+    // ~15 min idle spin-down timer while the instance is awake. It cannot wake
+    // an already-sleeping instance, so also add a free external pinger
+    // (UptimeRobot / cron-job.org every 5 min -> <domain>/health).
+    const keepalive = resolveKeepaliveConfig();
+    if (keepalive.enabled) {
+      startSelfPing(keepalive.publicUrl, keepalive.intervalMs);
+    } else {
+      console.log("⏰ Keep-alive self-ping disabled (set KEEPALIVE_URL or RENDER_EXTERNAL_URL to enable)");
+    }
   } else {
     // در محیط محلی (کامپیوتر خودتان): از Polling استفاده کن
     await bot.launch();
