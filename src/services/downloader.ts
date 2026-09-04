@@ -151,8 +151,16 @@ function buildCommonArgs(): string[] {
   }
   // Lets yt-dlp solve YouTube JS challenges instead of degrading extraction.
   if (hasNodeRuntime()) args.push("--js-runtimes", "node");
-  // Network resilience: don't hang forever on flaky mobile/CDN connections.
-  args.push("--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3");
+  // Speed: parallel fragment/HTTP downloads + skip TLS overhead.
+  args.push(
+    "--concurrent-fragments", "4",
+    "--concurrent-downloads", "4",
+    "--http-chunk-size", "10485760", // 10 MB chunks
+    "--socket-timeout", "15",
+    "--retries", "5",
+    "--fragment-retries", "5",
+    "--no-check-certificates"
+  );
   return args;
 }
 
@@ -170,7 +178,10 @@ interface AttemptSpec {
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
     return [
-      { name: "default", extraArgs: ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba"] },
+      // First try muxed mp4 (single stream, no merge needed = fastest)
+      { name: "muxed", extraArgs: ["-f", "b[ext=mp4]/b"] },
+      // DASH: parallel fragment download handles the speed here
+      { name: "dash", extraArgs: ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba"] },
       {
         name: "android",
         extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", "b[ext=mp4]/b"],
@@ -584,6 +595,8 @@ export async function downloadVideo(
     "mp4",
     "--ffmpeg-location",
     config.ffmpegDir,
+    "--downloader-args",
+    "ffmpeg:-threads 0", // use all CPU cores for ffmpeg merge
     "--max-filesize",
     `${config.maxFileSizeMB}M`,
     "-o",

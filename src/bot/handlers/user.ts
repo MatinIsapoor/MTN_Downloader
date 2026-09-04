@@ -161,6 +161,9 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
       );
 
       const caption = `${platformEmoji(platform)} ${platform} video\n🔗 ${url}`;
+
+      // Send video + extract audio in parallel (saves ~2-5s per download)
+      const audioPromise = extractAudio(result.filePath).catch(() => null);
       await ctx.replyWithVideo(Input.fromLocalFile(result.filePath, result.fileName), { caption });
 
       // --- Music: extract the video's audio track and send it as MP3 ---
@@ -168,18 +171,18 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
         await ctx.telegram
           .editMessageText(ctx.chat.id, statusMsg.message_id, undefined, `🎵 Video sent! Extracting music…`)
           .catch(() => {});
-        const audio = await extractAudio(result.filePath);
-        tempFiles.push(audio.filePath);
-        const audioCaption = `🎵 ${platform} music\n🔗 ${url}`;
-        await ctx.replyWithAudio(Input.fromLocalFile(audio.filePath, audio.fileName), {
-          caption: audioCaption,
-          title: result.title || `${platform} music`,
-        });
+        const audio = await audioPromise;
+        if (audio) {
+          tempFiles.push(audio.filePath);
+          const audioCaption = `🎵 ${platform} music\n🔗 ${url}`;
+          await ctx.replyWithAudio(Input.fromLocalFile(audio.filePath, audio.fileName), {
+            caption: audioCaption,
+            title: result.title || `${platform} music`,
+          });
+        }
       } catch (audioErr: any) {
         const audioMsg = audioErr?.message || "Unknown audio error";
         console.warn(`⚠️ Audio extraction failed for ${url}: ${audioMsg.slice(0, 200)}`);
-        // Only notify the user when it's informative (e.g. video truly has no
-        // audio). ffmpeg/install problems are already logged server-side.
         if (String(audioMsg).includes("no audio track")) {
           await ctx.reply("⚠️ This video has no audio track, so there's no music file to send.").catch(() => {});
         }
