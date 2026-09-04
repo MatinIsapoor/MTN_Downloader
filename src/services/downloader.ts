@@ -151,11 +151,9 @@ function buildCommonArgs(): string[] {
   }
   // Lets yt-dlp solve YouTube JS challenges instead of degrading extraction.
   if (hasNodeRuntime()) args.push("--js-runtimes", "node");
-  // Speed: parallel fragment/HTTP downloads + skip TLS overhead.
+  // Speed: parallel fragment downloads + skip TLS overhead.
   args.push(
     "--concurrent-fragments", "4",
-    "--concurrent-downloads", "4",
-    "--http-chunk-size", "10485760", // 10 MB chunks
     "--socket-timeout", "15",
     "--retries", "5",
     "--fragment-retries", "5",
