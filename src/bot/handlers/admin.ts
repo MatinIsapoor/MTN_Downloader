@@ -1,4 +1,5 @@
 import { Telegraf, Context, Markup } from "telegraf";
+import { message } from "telegraf/filters";
 import { adminOnly } from "../middlewares/auth";
 import {
   getOverallStats,
@@ -9,6 +10,8 @@ import {
   unbanUser,
   getUserCount,
 } from "../../database";
+import { getCookiesStatus, saveCookiesContent } from "../../services/downloader";
+import { config } from "../../config";
 
 // Broadcast state: stores adminId -> waiting for text
 const broadcastWaiting = new Set<number>();
@@ -27,7 +30,36 @@ function adminMenuKeyboard() {
     [Markup.button.callback("👥 User List", "admin_users"), Markup.button.callback("🔍 Find User", "admin_find")],
     [Markup.button.callback("📢 Broadcast", "admin_broadcast")],
     [Markup.button.callback("📈 Top Users", "admin_top_users")],
+    [Markup.button.callback("🍪 Cookies Status", "admin_cookies")],
   ]);
+}
+
+function cookiesStatusText(): string {
+  const s = getCookiesStatus();
+  const lines = [
+    "🍪 *YouTube Cookies Status*",
+    "",
+    `Source: \`${s.source}\``,
+    `Path: \`${s.path}\``,
+    `Valid: ${s.valid ? "✅ yes" : "❌ NO"}`,
+    `Detail: ${s.detail}`,
+  ];
+  if (s.total >= 0) {
+    lines.push(`Total cookies: *${s.total}* (youtube: *${s.youtube}*, expired: *${s.expiredYoutube}*, expiring<7d: *${s.expiringSoon}*)`);
+    lines.push(`Login session: ${s.hasLoginSession ? "✅ detected" : "❌ MISSING (exported logged-out?)"}`);
+  }
+  if (config.cookiesContent) lines.push("", "📌 `COOKIES_CONTENT` is set — file is restored from it on every boot (Render-safe).");
+  else if (process.env.RENDER_EXTERNAL_URL)
+    lines.push("", "⚠️ On Render without `COOKIES_CONTENT`, an uploaded `cookies.txt` is LOST on restart/redeploy — set `COOKIES_CONTENT` too.");
+  lines.push(
+    "",
+    "*Refresh (no restart needed):*",
+    "1\\. Log in at youtube\\.com in a FRESH private window \\(throwaway account recommended\\)",
+    "2\\. Export with “Get cookies\\.txt LOCALLY”, then close the window \\(don't log out\\)",
+    "3\\. Send the `cookies.txt` file to me HERE in chat — I apply it instantly",
+    "4\\. On Render: also paste its content into the `COOKIES_CONTENT` env var so it survives restarts"
+  );
+  return lines.join("\n");
 }
 
 function userRow(u: any) {
@@ -198,6 +230,71 @@ export function registerAdminHandlers(bot: Telegraf<Context>): void {
       parse_mode: "Markdown",
       reply_markup: { inline_keyboard: buttons },
     });
+  });
+
+  // ── Cookies status (button + /cookies command) ──
+  bot.action("admin_cookies", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!adminOnly(ctx)) return;
+    await ctx.reply(cookiesStatusText(), { parse_mode: "Markdown" });
+  });
+
+  bot.command("cookies", async (ctx) => {
+    if (!adminOnly(ctx)) return;
+    await ctx.reply(cookiesStatusText(), { parse_mode: "Markdown" });
+  });
+
+  // ── Cookies refresh via file upload ──
+  // Admin sends a fresh cookies.txt as a document: validated + applied instantly.
+  // No restart needed — the next download uses it. On Render also mirror it
+  // into COOKIES_CONTENT so it survives restarts/redeploys.
+  bot.on(message("document"), async (ctx) => {
+    if (!ctx.from || !adminOnly(ctx)) return;
+    const doc = ctx.message.document;
+    const name = (doc.file_name || "").toLowerCase();
+    const looksLikeCookies =
+      name.endsWith(".txt") || name.includes("cookie") || (doc.mime_type || "").includes("text");
+    if (!looksLikeCookies) return; // not for us — ignore silently
+
+    const size = doc.file_size ?? 0;
+    if (size > 1024 * 1024) {
+      await ctx.reply("❌ That file is too large for a cookies.txt (expected a few KB). Send the exported `cookies.txt`.");
+      return;
+    }
+    try {
+      const link = await ctx.telegram.getFileLink(doc.file_id);
+      const res = await fetch(link.href);
+      if (!res.ok) throw new Error(`Telegram file download HTTP ${res.status}`);
+      const text = await res.text();
+      if (!text.includes("youtube.com")) {
+        await ctx.reply(
+          "❌ That file has no `youtube.com` cookies — export while on youtube.com, logged in, in Netscape format."
+        );
+        return;
+      }
+      const status = saveCookiesContent(text);
+      if (!status.valid) {
+        await ctx.reply(
+          `⚠️ Saved, but the cookies look INVALID:\n${status.detail}\n\n` +
+            "Export again while LOGGED IN at youtube.com (fresh private window, throwaway account), then send the file again.\n\n" +
+            (config.cookiesContent
+              ? "Remember to also update `COOKIES_CONTENT` on Render, or the old env value will overwrite this on next boot."
+              : "Tip: also paste this file into the `COOKIES_CONTENT` env var on Render so it survives restarts.")
+        );
+        return;
+      }
+      let extra = "";
+      if (status.expiringSoon > 0) extra = `\n⚠️ Note: ${status.expiringSoon} cookies expire within 7 days.`;
+      await ctx.reply(
+        `✅ Cookies updated instantly — no restart needed.\n${status.detail}.${extra}\n\n` +
+          (config.cookiesContent
+            ? "⚠️ `COOKIES_CONTENT` is set: update it on Render too, or this upload will be overwritten on the next restart."
+            : "📌 On Render: also paste this file into the `COOKIES_CONTENT` env var so it survives restarts/redeploys.")
+      );
+    } catch (err: any) {
+      console.error(`❌ Cookies upload failed: ${err?.message || err}`);
+      await ctx.reply(`❌ Could not apply that file: ${(err?.message || String(err)).slice(0, 300)}`);
+    }
   });
 
   // ── Cancel broadcast ──

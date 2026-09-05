@@ -147,14 +147,24 @@ telegram/
 
 **YouTube: "Sign in to confirm you're not a bot"**
 - YouTube requires a logged-in session for most videos when downloaded from a server.
-  The bot retries several player clients automatically, but without cookies many
-  videos will still fail. Fix (one-time setup):
-  1. On your PC, open Chrome/Firefox, go to `youtube.com` and log in.
-  2. Install the **"Get cookies.txt LOCALLY"** extension and export cookies for YouTube.
-  3. Save the file as `cookies.txt` in the bot folder (same folder as `.env`),
-     or set a custom path via `COOKIES_PATH` in `.env`. Never commit this file to git.
-  4. Restart the bot — startup logs will confirm `Cookies: using file ...`.
-  5. Refresh the cookies every few weeks (YouTube sessions expire).
+  The bot retries several player clients automatically (cookie-respecting
+  `web` → `web_safari` → `web_embedded`, then anonymous `tv`/`android` without
+  cookies so many public videos still work when the session is dead), but without
+  fresh cookies many videos will still fail. Sessions expire every few weeks —
+  refreshing is normal maintenance, but it no longer needs a restart:
+  1. On your PC, open a FRESH private window, go to `youtube.com` and log in
+     (use a throwaway Google account — downloader sessions get flagged).
+  2. Install the **"Get cookies.txt LOCALLY"** extension and export cookies for YouTube,
+     then close the private window immediately (don't keep browsing or log out —
+     both rotate/invalidate the session).
+  3. Send the `cookies.txt` file to the bot in Telegram as admin — it is validated
+     and applied instantly (check with `/cookies`). No restart needed.
+  4. On Render (ephemeral filesystem wipes uploaded files on restart/redeploy):
+     also paste the file content into the `COOKIES_CONTENT` env var in the Render
+     dashboard (raw text or base64). The bot restores `cookies.txt` from it on every boot.
+  5. Run `/cookies` anytime to see status (expired count, missing login session, 7-day expiry warning).
+- Startup logs confirm `Cookies: using file ...`; a `COOKIES_CONTENT` mismatch warning
+  tells you the upload will be lost on next restart.
 - Alternative (local PC only): set `COOKIES_FROM_BROWSER=chrome` (or `firefox`/`edge`)
   in `.env` so yt-dlp reads cookies straight from your browser.
 

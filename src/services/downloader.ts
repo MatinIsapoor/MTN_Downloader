@@ -79,6 +79,7 @@ function supportsImpersonate(): boolean {
 
 function hasCookies(): boolean {
   if (config.cookiesFromBrowser) return true;
+  if (config.cookiesContent) return true;
   try {
     return fs.existsSync(config.cookiesPath);
   } catch {
@@ -86,18 +87,190 @@ function hasCookies(): boolean {
   }
 }
 
+export interface CookieStatus {
+  source: "browser" | "env" | "file" | "none";
+  path: string;
+  total: number;
+  youtube: number;
+  expiredYoutube: number;
+  expiringSoon: number;
+  hasLoginSession: boolean;
+  valid: boolean;
+  detail: string;
+}
+
+/** Parse a Netscape cookies file into rows. Returns null when unreadable. */
+function parseCookieFile(raw: string): Array<{ domain: string; expires: number; name: string }> | null {
+  try {
+    const rows: Array<{ domain: string; expires: number; name: string }> = [];
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const parts = t.split("\t");
+      if (parts.length < 7) continue;
+      const domain = parts[0] || "";
+      const expires = Number(parts[4] || "0") || 0;
+      const name = parts[5] || "";
+      rows.push({ domain, expires, name });
+    }
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
+/** Decode COOKIES_CONTENT (raw Netscape text or base64) into file text. */
+export function decodeCookiesEnv(raw: string): string | null {
+  const s = (raw || "").trim();
+  if (!s) return null;
+  if (s.includes("youtube.com") && s.includes("\n")) return s;
+  // Try base64 (Render dashboard-safe). Must decode to something cookie-like.
+  try {
+    const decoded = Buffer.from(s.replace(/\s+/g, ""), "base64").toString("utf8");
+    if (decoded.includes("youtube.com") || decoded.includes("# Netscape")) return decoded;
+  } catch {}
+  // Single-line edge case: env var with literal \n escapes.
+  if (s.includes("\\n")) {
+    const unescaped = s.replace(/\\n/g, "\n");
+    if (unescaped.includes("youtube.com")) return unescaped;
+  }
+  return null;
+}
+
+/** Validate raw cookies text. Shared by file, env var, and Telegram uploads. */
+export function validateCookiesContent(raw: string): CookieStatus {
+  const rows = parseCookieFile(raw);
+  if (!rows) {
+    return {
+      source: "file", path: config.cookiesPath, total: 0, youtube: 0,
+      expiredYoutube: 0, expiringSoon: 0, hasLoginSession: false, valid: false,
+      detail: "unreadable",
+    };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const soon = now + 7 * 24 * 3600;
+  const yt = rows.filter((r) => r.domain.includes("youtube.com"));
+  const expired = yt.filter((r) => r.expires !== 0 && r.expires < now).length;
+  const expiring = yt.filter((r) => r.expires !== 0 && r.expires >= now && r.expires < soon).length;
+  const names = new Set(yt.map((r) => r.name));
+  const hasLoginSession =
+    (names.has("SID") || names.has("__Secure-1PSID") || names.has("__Secure-3PSID")) &&
+    (names.has("LOGIN_INFO") || names.has("SSID") || names.has("HSID"));
+  let detail: string;
+  let valid = true;
+  if (rows.length === 0) {
+    detail = "file exists but has NO cookies (empty?) — re-export it";
+    valid = false;
+  } else if (yt.length === 0) {
+    detail = `${rows.length} cookies but NONE for youtube.com — export while on youtube.com, logged in`;
+    valid = false;
+  } else if (!hasLoginSession) {
+    detail = `${rows.length} cookies (${yt.length} for youtube.com) but NO login session (SID/LOGIN_INFO missing) — export while LOGGED IN at youtube.com`;
+    valid = false;
+  } else if (expired > 0 && expired >= yt.length / 2) {
+    detail = `${yt.length} youtube cookies, but ${expired} are EXPIRED — re-export fresh cookies`;
+    valid = false;
+  } else {
+    const kb = (Buffer.byteLength(raw, "utf8") / 1024).toFixed(1);
+    detail = `${rows.length} cookies (${yt.length} for youtube.com, ${kb} KB)`;
+    if (expired > 0) detail += `, ${expired} expired`;
+    if (expiring > 0) detail += `, ${expiring} expire within 7 days`;
+  }
+  return {
+    source: "file", path: config.cookiesPath, total: rows.length, youtube: yt.length,
+    expiredYoutube: expired, expiringSoon: expiring,
+    hasLoginSession, valid, detail,
+  };
+}
+
+/** Save fresh cookies text to disk (used by env restore + Telegram upload). No restart needed. */
+export function saveCookiesContent(raw: string): CookieStatus {
+  const status = validateCookiesContent(raw);
+  const dir = path.dirname(config.cookiesPath);
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const normalized = raw.trim().endsWith("\n") ? raw.trim() + "\n" : raw.trim() + "\n";
+    fs.writeFileSync(config.cookiesPath, normalized, "utf8");
+  } catch (err: any) {
+    throw new Error(`❌ Could not save cookies file (${config.cookiesPath}): ${err?.message || err}`);
+  }
+  if (!status.valid) {
+    console.warn(`⚠️ Saved cookies look invalid: ${status.detail}`);
+  } else {
+    console.log(`✅ Cookies saved to ${config.cookiesPath} (${status.detail}) — applies to the next download, no restart needed.`);
+  }
+  return status;
+}
+
+/**
+ * Render / Docker have ephemeral filesystems: a cookies.txt uploaded through
+ * the dashboard shell vanishes on the next restart/redeploy. If COOKIES_CONTENT
+ * is set, restore the file from it on every boot so sessions survive restarts.
+ */
+export function ensureCookiesFromEnv(): void {
+  if (config.cookiesFromBrowser || !config.cookiesContent) return;
+  const decoded = decodeCookiesEnv(config.cookiesContent);
+  if (!decoded) {
+    console.warn(
+      "⚠️ COOKIES_CONTENT is set but could not be decoded (expected raw Netscape text or base64). Ignoring it."
+    );
+    return;
+  }
+  try {
+    let current = "";
+    try {
+      current = fs.readFileSync(config.cookiesPath, "utf8");
+    } catch {}
+    if (current.trim() === decoded.trim()) {
+      console.log("🔧 Cookies: COOKIES_CONTENT matches cookies file, nothing to restore.");
+      return;
+    }
+    const status = saveCookiesContent(decoded);
+    console.log(`🔧 Cookies: restored from COOKIES_CONTENT env var (${status.detail}).`);
+  } catch (err: any) {
+    console.warn(`⚠️ Failed to restore cookies from COOKIES_CONTENT: ${err?.message || err}`);
+  }
+}
+
 /** Describe the cookie file so the admin can tell valid vs stale/missing at a glance. */
 function describeCookieFile(): string {
+  if (config.cookiesFromBrowser) return `reading from browser "${config.cookiesFromBrowser}"`;
+  if (config.cookiesContent) {
+    try {
+      const raw = fs.readFileSync(config.cookiesPath, "utf8");
+      return `${validateCookiesContent(raw).detail} [managed via COOKIES_CONTENT]`;
+    } catch {
+      return "COOKIES_CONTENT is set but cookies file is missing (will be restored on next boot)";
+    }
+  }
   try {
     const raw = fs.readFileSync(config.cookiesPath, "utf8");
-    const lines = raw.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"));
-    const yt = lines.filter((l) => l.includes("youtube.com")).length;
-    const kb = (fs.statSync(config.cookiesPath).size / 1024).toFixed(1);
-    if (lines.length === 0) return "file exists but has NO cookies (empty?) — re-export it";
-    if (yt === 0) return `${lines.length} cookies but NONE for youtube.com — export while logged in at youtube.com`;
-    return `${lines.length} cookies (${yt} for youtube.com, ${kb} KB)`;
+    return validateCookiesContent(raw).detail;
   } catch {
     return "unreadable";
+  }
+}
+
+/** Public status for the /cookies admin command. */
+export function getCookiesStatus(): CookieStatus {
+  if (config.cookiesFromBrowser) {
+    return {
+      source: "browser", path: config.cookiesFromBrowser, total: -1, youtube: -1,
+      expiredYoutube: 0, expiringSoon: 0, hasLoginSession: true, valid: true,
+      detail: `reading from browser "${config.cookiesFromBrowser}"`,
+    };
+  }
+  try {
+    const raw = fs.readFileSync(config.cookiesPath, "utf8");
+    const s = validateCookiesContent(raw);
+    s.source = config.cookiesContent ? "env" : "file";
+    return s;
+  } catch {
+    return {
+      source: "none", path: config.cookiesPath, total: 0, youtube: 0,
+      expiredYoutube: 0, expiringSoon: 0, hasLoginSession: false, valid: false,
+      detail: `no cookies file at ${config.cookiesPath}`,
+    };
   }
 }
 
@@ -118,11 +291,23 @@ export function logDownloaderDiagnostics(): void {
   if (config.cookiesFromBrowser) {
     console.log(`🔧 Cookies: reading from browser "${config.cookiesFromBrowser}"`);
   } else if (hasCookies()) {
-    console.log(`🔧 Cookies: using file ${config.cookiesPath} (${describeCookieFile()})`);
+    const status = getCookiesStatus();
+    console.log(`🔧 Cookies: using file ${config.cookiesPath} (${status.detail})`);
+    if (!status.valid) {
+      console.warn(`⚠️ Cookies look INVALID: ${status.detail}. YouTube will fail until fresh cookies are uploaded (send cookies.txt to the bot, no restart needed).`);
+    } else if (status.expiringSoon > 0) {
+      console.warn(`⚠️ ${status.expiringSoon} YouTube cookies expire within 7 days — plan a refresh soon (send a fresh cookies.txt to the bot).`);
+    }
+    if (!config.cookiesContent && process.env.RENDER_EXTERNAL_URL) {
+      console.warn(
+        "⚠️ Running on Render without COOKIES_CONTENT: cookies.txt will be LOST on the next restart/redeploy. " +
+          "Paste the file into the COOKIES_CONTENT env var to make it persistent."
+      );
+    }
   } else {
     console.warn(
-      `⚠️ No cookies configured (COOKIES_PATH=${config.cookiesPath} not found, COOKIES_FROM_BROWSER empty). ` +
-        `YouTube downloads will likely fail with "Sign in to confirm you're not a bot". See README to set up cookies.`
+      `⚠️ No cookies configured (COOKIES_PATH=${config.cookiesPath} not found, COOKIES_FROM_BROWSER/COOKIES_CONTENT empty). ` +
+        `YouTube downloads will likely fail with "Sign in to confirm you're not a bot". Send a cookies.txt to the bot or see README to set up cookies.`
     );
   }
   console.log(
@@ -138,16 +323,18 @@ const TIKTOK_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 /** Extra yt-dlp args derived from local capabilities: auth cookies + JS runtime. */
-function buildCommonArgs(): string[] {
+function buildCommonArgs(useCookies = true): string[] {
   const args: string[] = [];
-  if (config.cookiesFromBrowser) {
-    args.push("--cookies-from-browser", config.cookiesFromBrowser);
-    console.log(`✅ Using cookies from browser: ${config.cookiesFromBrowser}`);
-  } else if (fs.existsSync(config.cookiesPath)) {
-    args.push("--cookies", config.cookiesPath);
-    console.log(`✅ Using cookies from: ${config.cookiesPath}`);
-  } else {
-    console.warn(`⚠️ Cookie file not found at: ${config.cookiesPath} (YouTube may hit bot checks)`);
+  if (useCookies) {
+    if (config.cookiesFromBrowser) {
+      args.push("--cookies-from-browser", config.cookiesFromBrowser);
+      console.log(`✅ Using cookies from browser: ${config.cookiesFromBrowser}`);
+    } else if (fs.existsSync(config.cookiesPath)) {
+      args.push("--cookies", config.cookiesPath);
+      console.log(`✅ Using cookies from: ${config.cookiesPath}`);
+    } else {
+      console.warn(`⚠️ Cookie file not found at: ${config.cookiesPath} (YouTube may hit bot checks)`);
+    }
   }
   // Lets yt-dlp solve YouTube JS challenges instead of degrading extraction.
   if (hasNodeRuntime()) args.push("--js-runtimes", "node");
@@ -165,28 +352,48 @@ function buildCommonArgs(): string[] {
 interface AttemptSpec {
   name: string;
   extraArgs: string[];
+  /** false = run WITHOUT any cookies (anonymous clients that ignore/reject them). */
+  useCookies: boolean;
 }
 
 /**
- * Per-platform strategy chains. YouTube serves LOGIN_REQUIRED / bot-checks
- * inconsistently per player client, so retrying with mobile clients (which
- * get progressive mp4 streams) rescues some videos. TikTok aggressively
- * fingerprints TLS, so try browser impersonation first, then plain.
+ * Per-platform strategy chains.
+ *
+ * YouTube notes (yt-dlp 2025-2026):
+ * - The default `web` client needs a PO-token/JS challenge AND a logged-in
+ *   session from a datacenter IP (Render). `web_safari` / `web_embedded`
+ *   are challenged far less often and DO honor cookies.txt.
+ * - `tv` / `android` / `ios` do NOT honor Netscape cookies (different auth);
+ *   worse, pairing cookies with `tv` can invalidate the exported session.
+ *   So they run WITHOUT cookies as an anonymous last resort — many public
+ *   videos still download that way even when the saved session is dead.
  */
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
     return [
-      // First try muxed mp4 (single stream, no merge needed = fastest)
-      { name: "muxed", extraArgs: ["-f", "b[ext=mp4]/b"] },
-      // DASH: parallel fragment download handles the speed here
-      { name: "dash", extraArgs: ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba"] },
+      // Cookie-respecting clients first (need a valid logged-in session).
+      { name: "web", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true },
+      {
+        name: "web_safari",
+        extraArgs: ["--extractor-args", "youtube:player_client=web_safari", "-f", "b[ext=mp4]/b"],
+        useCookies: true,
+      },
+      {
+        name: "web_embedded",
+        extraArgs: ["--extractor-args", "youtube:player_client=web_embedded", "-f", "b[ext=mp4]/b"],
+        useCookies: true,
+      },
+      // Anonymous fallbacks WITHOUT cookies — rescue public videos even when
+      // the saved session expired/was rejected.
+      {
+        name: "tv",
+        extraArgs: ["--extractor-args", "youtube:player_client=tv", "-f", "b[ext=mp4]/b"],
+        useCookies: false,
+      },
       {
         name: "android",
         extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", "b[ext=mp4]/b"],
-      },
-      {
-        name: "ios",
-        extraArgs: ["--extractor-args", "youtube:player_client=ios", "-f", "b[ext=mp4]/b"],
+        useCookies: false,
       },
     ];
   }
@@ -196,15 +403,16 @@ function attemptsFor(platform: string): AttemptSpec[] {
       attempts.push({
         name: "impersonate",
         extraArgs: ["--impersonate", "chrome", "-f", "b[ext=mp4]/b"],
+        useCookies: true,
       });
     }
-    attempts.push({ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"] });
+    attempts.push({ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true });
     return attempts;
   }
   if (platform === "instagram" || platform === "twitter") {
-    return [{ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"] }];
+    return [{ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true }];
   }
-  return [{ name: "default", extraArgs: ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"] }];
+  return [{ name: "default", extraArgs: ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"], useCookies: true }];
 }
 
 /** Errors where retrying another strategy (or fallback) is pointless. */
@@ -221,7 +429,14 @@ function isFatalError(msg: string): boolean {
 }
 
 function isYouTubeBotCheck(msg: string): boolean {
-  return /Sign in to confirm you.{0,10}re not a bot/i.test(msg) || /LOGIN_REQUIRED/.test(msg);
+  return (
+    /Sign in to confirm you.{0,10}re not a bot/i.test(msg) ||
+    /not a bot/i.test(msg) ||
+    /LOGIN_REQUIRED/.test(msg) ||
+    /The page needs to be reloaded/i.test(msg) ||
+    /confirm your age/i.test(msg) ||
+    /use --cookies/i.test(msg)
+  );
 }
 
 function isTikTokBlock(msg: string): boolean {
@@ -534,26 +749,37 @@ function mapDownloadError(msg: string, platform: string): Error {
   }
   if (platform === "youtube" && isYouTubeBotCheck(msg)) {
     if (hasCookies()) {
-      // Cookies ARE configured, yet YouTube still rejects them: they are almost
-      // certainly expired (sessions die every few weeks) or were exported logged-out.
+      // Cookies ARE configured, and we already retried cookie-respecting
+      // clients (web/web_safari/web_embedded) plus anonymous tv/android
+      // fallbacks. If we are here, even the anonymous clients were blocked:
+      // the video likely needs a valid login (age-gated/private) or the
+      // datacenter IP is rate-limited. The saved session is expired/invalid.
+      const status = getCookiesStatus();
       console.error(
         `❌ YouTube bot-check hit DESPITE cookies (${describeCookieFile()}). ` +
-        `The cookies are expired/invalid — re-export fresh ones and restart the bot.`
+        `The cookies are expired/invalid — refresh them (no restart needed).`
       );
+      const hint = status.valid
+        ? "The file looks OK, so YouTube is likely rate-limiting this server's IP — wait ~1 hour and try again, then refresh cookies if it persists."
+        : `Cookie problem: ${status.detail}.`;
       return new Error(
         "❌ YouTube still blocked this download — the saved cookies were rejected (expired or logged-out).\n\n" +
-        "🔧 Admin: re-export fresh cookies (log in at youtube.com first!), overwrite `cookies.txt`, " +
-        "and restart the bot. Sessions expire every few weeks, so this step repeats."
+        `${hint}\n\n` +
+        "🔧 Admin: send a fresh `cookies.txt` to the bot (it updates instantly, no restart), " +
+        "or run /cookies for status. Export tip: log in at youtube.com in a FRESH private window, " +
+        "export immediately, then close the window without logging out. " +
+        "On Render also paste the file into the COOKIES_CONTENT env var so it survives restarts. " +
+        "Use a throwaway Google account — downloader sessions get flagged."
       );
     }
     console.error(
       "❌ YouTube bot-check hit with NO cookies configured. Fix: put logged-in YouTube cookies in " +
-      `${config.cookiesPath} (Netscape format) or set COOKIES_FROM_BROWSER in .env, then restart.`
+      `${config.cookiesPath} (Netscape format) or set COOKIES_FROM_BROWSER in .env. No restart needed — the next download picks them up.`
     );
     return new Error(
       "❌ YouTube blocked this download (bot verification).\n\n" +
-      "🔧 Admin: export logged-in YouTube cookies to `cookies.txt` next to the bot " +
-        "(or set `COOKIES_FROM_BROWSER=chrome` in .env) and restart the bot. See README 'Troubleshooting → YouTube'."
+      "🔧 Admin: send a logged-in `cookies.txt` to the bot (or run /cookies for status). " +
+        "No restart needed. See README 'Troubleshooting → YouTube'."
     );
   }
   if (platform === "tiktok" && isTikTokBlock(msg)) {
@@ -600,18 +826,27 @@ export async function downloadVideo(
     "-o",
     template,
     "--no-mtime",
-    ...buildCommonArgs(),
   ];
 
   const attempts = attemptsFor(platform);
   let lastError = "";
   for (const attempt of attempts) {
-    // Platform-specific format selectors
-    // YouTube DASH: video-only + audio-only streams → merge into one mp4 (needs ffmpeg)
-    // Mobile clients / TikTok/IG/Twitter: muxed mp4 files → single stream, no merge needed
-    const args = [...baseArgs, ...attempt.extraArgs, "--print", "after_move:filepath", url];
+    // Cookies are attached per-attempt: cookie-respecting clients get them,
+    // anonymous clients (tv/android) run WITHOUT them (they ignore cookies,
+    // and pairing cookies+tv can even invalidate the saved session).
+    const args = [
+      ...baseArgs,
+      ...buildCommonArgs(attempt.useCookies),
+      ...attempt.extraArgs,
+      "--print",
+      "after_move:filepath",
+      url,
+    ];
     try {
-      if (attempts.length > 1) console.log(`⏳ Trying ${platform} strategy: ${attempt.name}…`);
+      if (attempts.length > 1)
+        console.log(
+          `⏳ Trying ${platform} strategy: ${attempt.name}${attempt.useCookies ? " (cookies)" : " (no cookies)"}…`
+        );
       const stdout = await runYtDlpAttempt(args, onProgress);
       return resolveDownloadedFile(stdout, id, platform);
     } catch (err: any) {

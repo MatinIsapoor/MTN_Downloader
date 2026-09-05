@@ -11,7 +11,7 @@ import {
   setFindWaiting,
   handleFindText,
 } from "./bot/handlers/admin";
-import { cleanupOldFiles, logDownloaderDiagnostics } from "./services/downloader";
+import { cleanupOldFiles, logDownloaderDiagnostics, ensureCookiesFromEnv } from "./services/downloader";
 import {
   handleHealthRequest,
   resolveKeepaliveConfig,
@@ -26,6 +26,8 @@ async function main() {
   console.log("✅ Database initialized");
 
   // Downloader health: yt-dlp version, cookies, JS runtime, fallbacks
+  // Restore cookies.txt from COOKIES_CONTENT first (Render-safe persistence).
+  ensureCookiesFromEnv();
   logDownloaderDiagnostics();
 
   // Create bot

@@ -14,6 +14,11 @@ services:
         value: yt-dlp
       - key: MAX_FILE_SIZE_MB
         value: 50
+      # YouTube cookies, Render-safe: paste the full text of cookies.txt here
+      # (or base64). The bot rewrites cookies.txt from it on every boot, so
+      # sessions survive restarts/redeploys (uploaded files alone are wiped).
+      - key: COOKIES_CONTENT
+        sync: false
       # Self-ping interval (min). Stays under Render's ~15 min idle spin-down.
       - key: KEEPALIVE_INTERVAL_MINUTES
         value: 10

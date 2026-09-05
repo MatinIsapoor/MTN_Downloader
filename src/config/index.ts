@@ -29,6 +29,12 @@ export const config = {
   // cookies directly from a browser (e.g. "chrome", "firefox", "edge").
   cookiesPath: path.resolve(process.env.COOKIES_PATH || "./cookies.txt"),
   cookiesFromBrowser: (process.env.COOKIES_FROM_BROWSER || "").trim(),
+  // COOKIES_CONTENT: paste the full text of cookies.txt into an env var.
+  // REQUIRED on hosts with an ephemeral filesystem (Render free plan wipes
+  // uploaded files on every restart/redeploy). When set, the bot rewrites
+  // cookiesPath from this value on every boot, so sessions survive restarts.
+  // Accepts raw Netscape text OR base64-encoded text (safer for dashboards).
+  cookiesContent: (process.env.COOKIES_CONTENT || "").trim(),
   // TikTok fallback: when yt-dlp fails (IP blocks / API changes),
   // resolve the video through a third-party API and download the mp4 directly.
   tiktokFallback: (process.env.TIKTOK_FALLBACK || "true").toLowerCase() !== "false",
