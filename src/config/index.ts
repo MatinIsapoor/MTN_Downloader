@@ -39,7 +39,7 @@ export const config = {
   // resolve the video through a third-party API and download the mp4 directly.
   tiktokFallback: (process.env.TIKTOK_FALLBACK || "true").toLowerCase() !== "false",
   // YouTube without cookies: "auto" (default) tries anonymous player clients
-  // (tv/android/web_embedded, no login) FIRST and only uses cookies as a
+  // (android/mweb/web_safari/web_embedded, no login) FIRST and only uses cookies as a
   // fallback for age-gated/private/rate-limited videos. Most public videos
   // then work with no cookies uploaded at all. Set to "cookies" to force the
   // old behavior (cookies first), or "never" to never touch cookies.

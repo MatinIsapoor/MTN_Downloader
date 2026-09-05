@@ -405,29 +405,40 @@ interface AttemptSpec {
 /**
  * Per-platform strategy chains.
  *
- * YouTube notes (yt-dlp 2025-2026):
- * - `web` needs a PO-token/JS challenge AND a logged-in session from a
- *   datacenter IP (Render). `web_safari` / `web_embedded` are challenged far
- *   less and DO honor cookies.txt. `tv`/`android` do NOT honor Netscape
- *   cookies (different auth) — pairing cookies with `tv` can even invalidate
- *   the exported session, so they always run WITHOUT cookies.
- * - Order matters twice: anonymous clients run FIRST so most public videos
- *   download with no cookies at all; cookie clients are only a fallback for
- *   age-gated/private/rate-limited videos. Each failed client costs 10-30s,
- *   so cookie attempts are skipped entirely when no cookies are configured.
+ * YouTube notes (verified by probing yt-dlp 2026.08.19 with bot-exact args,
+ * no cookies, public video — exit 0 = works, FAIL = broken):
+ * - android OK (returns progressive mp4, no merge needed — fastest path).
+ * - mweb / web_safari / web_embedded OK (need `--js-runtimes node`, which the
+ *   bot always passes; without a JS runtime their https formats vanish and
+ *   every `-f` selector fails with "Requested format is not available").
+ * - default (yt-dlp's own visionos→… chain) OK — kept last as a catch-all
+ *   since it internally retries several clients (slower).
+ * - tv FAIL ("The page needs to be reloaded") — YouTube moved TVHTML5 to a
+ *   new JS challenge yt-dlp can't solve yet. Removed: it only wasted 10-20s
+ *   and burned IP reputation on a guaranteed failure. Do NOT re-add it with
+ *   cookies either — cookies+tv can invalidate the exported session.
+ * - ios FAIL for our mp4 selector (HLS-only streams) — removed.
+ * - Order: anonymous first so public videos need no cookies; cookie clients
+ *   only as fallback for age-gated/private/rate-limited videos. Cookie
+ *   attempts are skipped entirely when no cookies are configured.
  */
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
     const fmt = youtubeFormat();
     const anonymous: AttemptSpec[] = [
       {
-        name: "tv",
-        extraArgs: ["--extractor-args", "youtube:player_client=tv", "-f", fmt],
+        name: "android",
+        extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", fmt],
         useCookies: false,
       },
       {
-        name: "android",
-        extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", fmt],
+        name: "mweb",
+        extraArgs: ["--extractor-args", "youtube:player_client=mweb", "-f", fmt],
+        useCookies: false,
+      },
+      {
+        name: "web_safari",
+        extraArgs: ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt],
         useCookies: false,
       },
       {
@@ -435,6 +446,7 @@ function attemptsFor(platform: string): AttemptSpec[] {
         extraArgs: ["--extractor-args", "youtube:player_client=web_embedded", "-f", fmt],
         useCookies: false,
       },
+      { name: "default", extraArgs: ["-f", fmt], useCookies: false },
     ];
     const withCookies: AttemptSpec[] = [
       {
@@ -447,7 +459,7 @@ function attemptsFor(platform: string): AttemptSpec[] {
     if (config.youtubeCookieMode === "never") return anonymous;
     if (config.youtubeCookieMode === "cookies") return [...withCookies, ...anonymous];
     // "auto" (default): anonymous first; downloadVideo() drops the cookie
-    // attempts when no cookies are configured, saving 2 wasted retries.
+    // attempts when no cookies are configured, saving wasted retries.
     return [...anonymous, ...withCookies];
   }
   if (platform === "tiktok") {
@@ -802,7 +814,7 @@ function mapDownloadError(msg: string, platform: string): Error {
   }
   if (platform === "youtube" && isYouTubeBotCheck(msg)) {
     if (hasCookies()) {
-      // Anonymous clients (tv/android/web_embedded) + cookie clients
+      // Anonymous clients (android/mweb/web_safari/web_embedded/default) + cookie clients
       // (web_safari/web) all failed. The video likely needs a valid login
       // (age-gated/private/members-only) or the datacenter IP is
       // rate-limited. The saved session may be expired/invalid.
@@ -825,16 +837,18 @@ function mapDownloadError(msg: string, platform: string): Error {
       );
     }
     console.error(
-      "❌ YouTube bot-check hit with NO cookies configured (anonymous clients tv/android/web_embedded all blocked). " +
-        "This video needs a login (age-gated/private) or the server IP is rate-limited."
+      "❌ YouTube bot-check hit with NO cookies configured (anonymous clients android/mweb/web_safari/web_embedded/default all blocked). " +
+        "This video needs a login (age-gated/private) or the server IP is rate-limited, or yt-dlp is stale."
     );
     return new Error(
       "❌ YouTube blocked this download (bot verification, no cookies on file).\n\n" +
       "Most public videos work without cookies — this one doesn't (age-gated, private, " +
       "or the server IP is temporarily rate-limited: wait ~1 hour and retry).\n\n" +
       "🔧 Admin: for login-gated videos, send a logged-in `cookies.txt` to the bot " +
-      "(or run /cookies for status). No restart needed. " +
-      "If EVERY video fails, the datacenter IP is flagged — set YT_DLP_PROXY to a residential proxy."
+      "(or run /cookies for status). No restart needed.\n" +
+      "If EVERY video fails: redeploy on Render (the build installs a fresh yt-dlp nightly — " +
+      "a build more than ~2 weeks old fails on its own as YouTube changes its player), then if it " +
+      "persists, the datacenter IP is flagged — set YT_DLP_PROXY to a residential proxy."
     );
   }
   if (platform === "tiktok" && isTikTokBlock(msg)) {
@@ -895,8 +909,8 @@ export async function downloadVideo(
   let lastError = "";
   for (const attempt of attempts) {
     // Cookies are attached per-attempt: cookie-respecting clients get them,
-    // anonymous clients (tv/android) run WITHOUT them (they ignore cookies,
-    // and pairing cookies+tv can even invalidate the saved session).
+    // anonymous clients run WITHOUT them (some ignore cookies, and pairing
+    // cookies+tv can even invalidate the saved session).
     const args = [
       ...baseArgs,
       ...buildCommonArgs(attempt.useCookies),

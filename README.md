@@ -147,12 +147,15 @@ telegram/
 
 **YouTube: "Sign in to confirm you're not a bot" / do I need cookies?**
 - No — cookies are OPTIONAL now. The bot tries anonymous clients
-  (`tv` → `android` → `web_embedded`, no login) FIRST, so most public videos
+  (`android` → `mweb` → `web_safari` → `web_embedded` → default chain, no login) FIRST, so most public videos
   download with nothing uploaded. Cookies are only a fallback for age-gated,
   private/members-only, or IP-rate-limited videos.
 - Honest limit: Render uses datacenter IPs, which get YouTube's strictest
   bot-checks. No flag fixes a hard IP block 100% — if EVERY video fails,
-  the IP is flagged: wait ~1 hour (rate-limit), or set `YT_DLP_PROXY` to a
+  first redeploy (the build installs a fresh yt-dlp nightly; a build older
+  than ~2 weeks fails on its own as YouTube changes its player — check the
+  `yt-dlp version:` line in the Render logs), then wait ~1 hour (rate-limit),
+  and if it persists the IP is flagged: set `YT_DLP_PROXY` to a
   residential proxy (the only real fix for a flagged IP).
 - When cookies ARE needed (login-gated video), refreshing is normal
   maintenance (sessions expire every few weeks) and needs no restart:
