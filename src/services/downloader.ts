@@ -857,6 +857,27 @@ function mapDownloadError(msg: string, platform: string): Error {
       "Please try again later or try another link."
     );
   }
+  if (platform === "youtube" && msg.includes("Failed to extract any player response")) {
+    // yt-dlp got zero usable player data from ANY client. On a datacenter IP
+    // this is the harsh form of the login-wall/rate-limit (elsewhere it
+    // surfaces as "Sign in to confirm you're not a bot"); on an old build it
+    // just means yt-dlp predates YouTube's current player.
+    console.error(
+      `❌ YouTube returned no player response for this video (all clients failed).`
+    );
+    return new Error(
+      "❌ YouTube returned no playable data for this video.\n\n" +
+      "Most likely, in order: (1) this video is login-walled by YouTube " +
+      "(age-restricted/private — these fail on every client even outside Render, " +
+      "so a logged-in `cookies.txt` is the only fix), " +
+      "(2) your Render build is stale — redeploy so the build installs a fresh " +
+      "yt-dlp nightly (builds older than ~2 weeks die on their own as YouTube " +
+      "changes its player), " +
+      "(3) the server IP is hard-blocked — wait ~1 hour or set YT_DLP_PROXY.\n\n" +
+      "🔧 Admin: run /cookies for status; to test the video, open it logged-OUT " +
+      "in an incognito window — if YouTube asks you to sign in, cookies are mandatory."
+    );
+  }
   return new Error(`❌ Download failed:\n${msg.slice(0, 800)}`);
 }
 
@@ -907,6 +928,7 @@ export async function downloadVideo(
     return true;
   });
   let lastError = "";
+  const allErrors: string[] = [];
   for (const attempt of attempts) {
     // Cookies are attached per-attempt: cookie-respecting clients get them,
     // anonymous clients run WITHOUT them (some ignore cookies, and pairing
@@ -928,6 +950,7 @@ export async function downloadVideo(
       return resolveDownloadedFile(stdout, id, platform);
     } catch (err: any) {
       lastError = err?.message || String(err);
+      allErrors.push(`[${attempt.name}] ${lastError}`);
       console.warn(`⚠️ ${platform} strategy "${attempt.name}" failed: ${lastError.slice(0, 200)}`);
       // Fatal errors (private/deleted/too large/unsupported) won't be fixed by another strategy.
       if (isFatalError(lastError)) throw mapDownloadError(lastError, platform);
@@ -945,7 +968,11 @@ export async function downloadVideo(
     }
   }
 
-  throw mapDownloadError(lastError || "yt-dlp failed without output", platform);
+  // Diagnose from the combined output of ALL attempts, not just the last one:
+  // clients fail differently (bot-check on one, empty player response on
+  // another) for the same root cause, and the last error alone misleads.
+  const combinedError = allErrors.join("\n") || lastError || "yt-dlp failed without output";
+  throw mapDownloadError(combinedError, platform);
 }
 
 export function cleanupFile(filePath: string): void {
