@@ -294,7 +294,7 @@ export function logDownloaderDiagnostics(): void {
     const status = getCookiesStatus();
     console.log(`🔧 Cookies: using file ${config.cookiesPath} (${status.detail})`);
     if (!status.valid) {
-      console.warn(`⚠️ Cookies look INVALID: ${status.detail}. YouTube will fail until fresh cookies are uploaded (send cookies.txt to the bot, no restart needed).`);
+      console.warn(`⚠️ Cookies look INVALID: ${status.detail}. Cookie-only videos will fail until fresh cookies are uploaded (send cookies.txt to the bot, no restart needed).`);
     } else if (status.expiringSoon > 0) {
       console.warn(`⚠️ ${status.expiringSoon} YouTube cookies expire within 7 days — plan a refresh soon (send a fresh cookies.txt to the bot).`);
     }
@@ -305,11 +305,20 @@ export function logDownloaderDiagnostics(): void {
       );
     }
   } else {
-    console.warn(
-      `⚠️ No cookies configured (COOKIES_PATH=${config.cookiesPath} not found, COOKIES_FROM_BROWSER/COOKIES_CONTENT empty). ` +
-        `YouTube downloads will likely fail with "Sign in to confirm you're not a bot". Send a cookies.txt to the bot or see README to set up cookies.`
+    console.log(
+      `🔧 Cookies: none configured — YouTube runs cookie-free (anonymous clients first). ` +
+        `Most public videos work; age-gated/private ones need cookies (send cookies.txt to the bot).`
     );
   }
+  console.log(`🔧 YouTube mode: cookie=${config.youtubeCookieMode}, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
+  console.log(
+    hasAria2c()
+      ? "🔧 Downloader: aria2c available (8-connection fast downloads enabled)"
+      : "🔧 Downloader: native (install aria2c for faster progressive-mp4 downloads)"
+  );
+  if (config.ytDlpProxy) console.log("🔧 Proxy: YT_DLP_PROXY is set (YouTube traffic routed via proxy)");
+  else if (process.env.RENDER_EXTERNAL_URL || process.env.RENDER)
+    console.log("🔧 Proxy: none (datacenter IP — if YouTube hard-blocks it, set YT_DLP_PROXY to a residential proxy)");
   console.log(
     config.tiktokFallback
       ? "🔧 TikTok fallback providers: enabled (tikwm x2 + ssstik)"
@@ -322,10 +331,33 @@ const AUDIO_EXTENSIONS = new Set(["m4a", "mp3", "ogg", "opus", "wav", "aac", "fl
 const TIKTOK_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+let _hasAria2c: boolean | null = null;
+/** aria2c with 8 connections downloads progressive mp4s much faster than native. */
+function hasAria2c(): boolean {
+  if (_hasAria2c === null) {
+    try {
+      execSync("aria2c --version", { stdio: "ignore" });
+      _hasAria2c = true;
+    } catch {
+      _hasAria2c = false;
+    }
+  }
+  return _hasAria2c;
+}
+
+/** Resolution-capped muxed-mp4 selector: 720p default = 3-5x smaller = much faster. */
+function youtubeFormat(): string {
+  const h = config.youtubeMaxHeight;
+  if (h > 0) return `b[height<=${h}][ext=mp4]/b[ext=mp4]/b`;
+  return "b[ext=mp4]/b";
+}
+
 /** Extra yt-dlp args derived from local capabilities: auth cookies + JS runtime. */
 function buildCommonArgs(useCookies = true): string[] {
   const args: string[] = [];
-  if (useCookies) {
+  const cookieMode = config.youtubeCookieMode;
+  const wantCookies = useCookies && cookieMode !== "never";
+  if (wantCookies) {
     if (config.cookiesFromBrowser) {
       args.push("--cookies-from-browser", config.cookiesFromBrowser);
       console.log(`✅ Using cookies from browser: ${config.cookiesFromBrowser}`);
@@ -333,19 +365,33 @@ function buildCommonArgs(useCookies = true): string[] {
       args.push("--cookies", config.cookiesPath);
       console.log(`✅ Using cookies from: ${config.cookiesPath}`);
     } else {
-      console.warn(`⚠️ Cookie file not found at: ${config.cookiesPath} (YouTube may hit bot checks)`);
+      console.warn(`⚠️ Cookie file not found at: ${config.cookiesPath} (trying without cookies)`);
     }
   }
+  // Optional residential proxy — the only fix when the datacenter IP itself is flagged.
+  if (config.ytDlpProxy) args.push("--proxy", config.ytDlpProxy);
   // Lets yt-dlp solve YouTube JS challenges instead of degrading extraction.
   if (hasNodeRuntime()) args.push("--js-runtimes", "node");
-  // Speed: parallel fragment downloads + skip TLS overhead.
+  // Speed: chunked HTTP bypasses per-connection throttling on progressive mp4s;
+  // parallel fragments help DASH/HLS; short timeouts + few retries fail over
+  // to the next player client fast instead of stalling on a blocked one.
   args.push(
-    "--concurrent-fragments", "4",
-    "--socket-timeout", "15",
-    "--retries", "5",
-    "--fragment-retries", "5",
+    "--concurrent-fragments", "8",
+    "--http-chunk-size", "10M",
+    "--buffer-size", "16K",
+    "--socket-timeout", "10",
+    "--retries", "3",
+    "--fragment-retries", "3",
     "--no-check-certificates"
   );
+  // aria2c (8 connections) is far faster than the native downloader for
+  // progressive http mp4s, when it is installed. Probe once, use if present.
+  if (hasAria2c()) {
+    args.push(
+      "--downloader", "aria2c",
+      "--downloader-args", "aria2c:-x 8 -s 8 -k 1M --min-split-size=1M"
+    );
+  }
   return args;
 }
 
@@ -360,42 +406,49 @@ interface AttemptSpec {
  * Per-platform strategy chains.
  *
  * YouTube notes (yt-dlp 2025-2026):
- * - The default `web` client needs a PO-token/JS challenge AND a logged-in
- *   session from a datacenter IP (Render). `web_safari` / `web_embedded`
- *   are challenged far less often and DO honor cookies.txt.
- * - `tv` / `android` / `ios` do NOT honor Netscape cookies (different auth);
- *   worse, pairing cookies with `tv` can invalidate the exported session.
- *   So they run WITHOUT cookies as an anonymous last resort — many public
- *   videos still download that way even when the saved session is dead.
+ * - `web` needs a PO-token/JS challenge AND a logged-in session from a
+ *   datacenter IP (Render). `web_safari` / `web_embedded` are challenged far
+ *   less and DO honor cookies.txt. `tv`/`android` do NOT honor Netscape
+ *   cookies (different auth) — pairing cookies with `tv` can even invalidate
+ *   the exported session, so they always run WITHOUT cookies.
+ * - Order matters twice: anonymous clients run FIRST so most public videos
+ *   download with no cookies at all; cookie clients are only a fallback for
+ *   age-gated/private/rate-limited videos. Each failed client costs 10-30s,
+ *   so cookie attempts are skipped entirely when no cookies are configured.
  */
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
-    return [
-      // Cookie-respecting clients first (need a valid logged-in session).
-      { name: "web", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true },
-      {
-        name: "web_safari",
-        extraArgs: ["--extractor-args", "youtube:player_client=web_safari", "-f", "b[ext=mp4]/b"],
-        useCookies: true,
-      },
-      {
-        name: "web_embedded",
-        extraArgs: ["--extractor-args", "youtube:player_client=web_embedded", "-f", "b[ext=mp4]/b"],
-        useCookies: true,
-      },
-      // Anonymous fallbacks WITHOUT cookies — rescue public videos even when
-      // the saved session expired/was rejected.
+    const fmt = youtubeFormat();
+    const anonymous: AttemptSpec[] = [
       {
         name: "tv",
-        extraArgs: ["--extractor-args", "youtube:player_client=tv", "-f", "b[ext=mp4]/b"],
+        extraArgs: ["--extractor-args", "youtube:player_client=tv", "-f", fmt],
         useCookies: false,
       },
       {
         name: "android",
-        extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", "b[ext=mp4]/b"],
+        extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", fmt],
+        useCookies: false,
+      },
+      {
+        name: "web_embedded",
+        extraArgs: ["--extractor-args", "youtube:player_client=web_embedded", "-f", fmt],
         useCookies: false,
       },
     ];
+    const withCookies: AttemptSpec[] = [
+      {
+        name: "web_safari",
+        extraArgs: ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt],
+        useCookies: true,
+      },
+      { name: "web", extraArgs: ["-f", fmt], useCookies: true },
+    ];
+    if (config.youtubeCookieMode === "never") return anonymous;
+    if (config.youtubeCookieMode === "cookies") return [...withCookies, ...anonymous];
+    // "auto" (default): anonymous first; downloadVideo() drops the cookie
+    // attempts when no cookies are configured, saving 2 wasted retries.
+    return [...anonymous, ...withCookies];
   }
   if (platform === "tiktok") {
     const attempts: AttemptSpec[] = [];
@@ -749,11 +802,10 @@ function mapDownloadError(msg: string, platform: string): Error {
   }
   if (platform === "youtube" && isYouTubeBotCheck(msg)) {
     if (hasCookies()) {
-      // Cookies ARE configured, and we already retried cookie-respecting
-      // clients (web/web_safari/web_embedded) plus anonymous tv/android
-      // fallbacks. If we are here, even the anonymous clients were blocked:
-      // the video likely needs a valid login (age-gated/private) or the
-      // datacenter IP is rate-limited. The saved session is expired/invalid.
+      // Anonymous clients (tv/android/web_embedded) + cookie clients
+      // (web_safari/web) all failed. The video likely needs a valid login
+      // (age-gated/private/members-only) or the datacenter IP is
+      // rate-limited. The saved session may be expired/invalid.
       const status = getCookiesStatus();
       console.error(
         `❌ YouTube bot-check hit DESPITE cookies (${describeCookieFile()}). ` +
@@ -773,13 +825,16 @@ function mapDownloadError(msg: string, platform: string): Error {
       );
     }
     console.error(
-      "❌ YouTube bot-check hit with NO cookies configured. Fix: put logged-in YouTube cookies in " +
-      `${config.cookiesPath} (Netscape format) or set COOKIES_FROM_BROWSER in .env. No restart needed — the next download picks them up.`
+      "❌ YouTube bot-check hit with NO cookies configured (anonymous clients tv/android/web_embedded all blocked). " +
+        "This video needs a login (age-gated/private) or the server IP is rate-limited."
     );
     return new Error(
-      "❌ YouTube blocked this download (bot verification).\n\n" +
-      "🔧 Admin: send a logged-in `cookies.txt` to the bot (or run /cookies for status). " +
-        "No restart needed. See README 'Troubleshooting → YouTube'."
+      "❌ YouTube blocked this download (bot verification, no cookies on file).\n\n" +
+      "Most public videos work without cookies — this one doesn't (age-gated, private, " +
+      "or the server IP is temporarily rate-limited: wait ~1 hour and retry).\n\n" +
+      "🔧 Admin: for login-gated videos, send a logged-in `cookies.txt` to the bot " +
+      "(or run /cookies for status). No restart needed. " +
+      "If EVERY video fails, the datacenter IP is flagged — set YT_DLP_PROXY to a residential proxy."
     );
   }
   if (platform === "tiktok" && isTikTokBlock(msg)) {
@@ -828,7 +883,15 @@ export async function downloadVideo(
     "--no-mtime",
   ];
 
-  const attempts = attemptsFor(platform);
+  const attempts = attemptsFor(platform).filter((a) => {
+    // Skip cookie attempts when there is nothing to send — each one would
+    // just waste 10-30s failing the same way as the anonymous attempts.
+    if (platform === "youtube" && a.useCookies && !hasCookies()) {
+      console.log(`⏭️ Skipping ${platform} strategy "${a.name}" (no cookies configured)`);
+      return false;
+    }
+    return true;
+  });
   let lastError = "";
   for (const attempt of attempts) {
     // Cookies are attached per-attempt: cookie-respecting clients get them,

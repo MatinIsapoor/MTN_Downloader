@@ -14,11 +14,18 @@ services:
         value: yt-dlp
       - key: MAX_FILE_SIZE_MB
         value: 50
-      # YouTube cookies, Render-safe: paste the full text of cookies.txt here
-      # (or base64). The bot rewrites cookies.txt from it on every boot, so
-      # sessions survive restarts/redeploys (uploaded files alone are wiped).
+      # YouTube cookies, Render-safe (OPTIONAL — only for age-gated/private
+      # videos or IP rate-limits; public videos work cookie-free). Paste the
+      # full text of cookies.txt here (or base64). The bot rewrites cookies.txt
+      # from it on every boot, so sessions survive restarts/redeploys.
       - key: COOKIES_CONTENT
         sync: false
+      # YouTube quality cap: 720p keeps downloads fast + under the 50MB limit.
+      - key: YOUTUBE_MAX_HEIGHT
+        value: 720
+      # Optional: residential proxy when the datacenter IP is hard-blocked.
+      # - key: YT_DLP_PROXY
+      #   sync: false
       # Self-ping interval (min). Stays under Render's ~15 min idle spin-down.
       - key: KEEPALIVE_INTERVAL_MINUTES
         value: 10

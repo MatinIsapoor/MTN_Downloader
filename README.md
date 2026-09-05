@@ -145,13 +145,17 @@ telegram/
 - Install yt-dlp: https://github.com/yt-dlp/yt-dlp#installation
 - Or set `YT_DLP_PATH` in .env to full path
 
-**YouTube: "Sign in to confirm you're not a bot"**
-- YouTube requires a logged-in session for most videos when downloaded from a server.
-  The bot retries several player clients automatically (cookie-respecting
-  `web` → `web_safari` → `web_embedded`, then anonymous `tv`/`android` without
-  cookies so many public videos still work when the session is dead), but without
-  fresh cookies many videos will still fail. Sessions expire every few weeks —
-  refreshing is normal maintenance, but it no longer needs a restart:
+**YouTube: "Sign in to confirm you're not a bot" / do I need cookies?**
+- No — cookies are OPTIONAL now. The bot tries anonymous clients
+  (`tv` → `android` → `web_embedded`, no login) FIRST, so most public videos
+  download with nothing uploaded. Cookies are only a fallback for age-gated,
+  private/members-only, or IP-rate-limited videos.
+- Honest limit: Render uses datacenter IPs, which get YouTube's strictest
+  bot-checks. No flag fixes a hard IP block 100% — if EVERY video fails,
+  the IP is flagged: wait ~1 hour (rate-limit), or set `YT_DLP_PROXY` to a
+  residential proxy (the only real fix for a flagged IP).
+- When cookies ARE needed (login-gated video), refreshing is normal
+  maintenance (sessions expire every few weeks) and needs no restart:
   1. On your PC, open a FRESH private window, go to `youtube.com` and log in
      (use a throwaway Google account — downloader sessions get flagged).
   2. Install the **"Get cookies.txt LOCALLY"** extension and export cookies for YouTube,
@@ -163,10 +167,18 @@ telegram/
      also paste the file content into the `COOKIES_CONTENT` env var in the Render
      dashboard (raw text or base64). The bot restores `cookies.txt` from it on every boot.
   5. Run `/cookies` anytime to see status (expired count, missing login session, 7-day expiry warning).
-- Startup logs confirm `Cookies: using file ...`; a `COOKIES_CONTENT` mismatch warning
-  tells you the upload will be lost on next restart.
+  6. `YOUTUBE_COOKIE_MODE`: `auto` (default, anonymous first) / `cookies` (cookies first)
+     / `never` (never use cookies).
 - Alternative (local PC only): set `COOKIES_FROM_BROWSER=chrome` (or `firefox`/`edge`)
   in `.env` so yt-dlp reads cookies straight from your browser.
+
+**Slow YouTube downloads?**
+- The bot caps YouTube at 720p (`YOUTUBE_MAX_HEIGHT=720`, set `1080`/`0` for full
+  quality) — 720p is 3-5x smaller, so it downloads and uploads to Telegram much
+  faster and stays under the 50MB bot limit.
+- It also uses 10MB HTTP chunks (throttle bypass), 8 parallel fragments, fast
+  failover between player clients, and aria2c with 8 connections when installed
+  (`build.sh` tries to install it; startup logs confirm).
 
 **TikTok: "blocked" / "Unexpected response from webpage"**
 - TikTok aggressively blocks server IPs and changes its API. The bot now:

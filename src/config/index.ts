@@ -38,6 +38,24 @@ export const config = {
   // TikTok fallback: when yt-dlp fails (IP blocks / API changes),
   // resolve the video through a third-party API and download the mp4 directly.
   tiktokFallback: (process.env.TIKTOK_FALLBACK || "true").toLowerCase() !== "false",
+  // YouTube without cookies: "auto" (default) tries anonymous player clients
+  // (tv/android/web_embedded, no login) FIRST and only uses cookies as a
+  // fallback for age-gated/private/rate-limited videos. Most public videos
+  // then work with no cookies uploaded at all. Set to "cookies" to force the
+  // old behavior (cookies first), or "never" to never touch cookies.
+  youtubeCookieMode: (() => {
+    const v = (process.env.YOUTUBE_COOKIE_MODE || "auto").trim().toLowerCase();
+    return v === "cookies" || v === "never" ? v : "auto";
+  })(),
+  // Cap YouTube quality (default 720). Telegram caps bots at 50MB and 720p
+  // is 3-5x smaller than 1080p+, so this is the single biggest download +
+  // upload speedup. Set YOUTUBE_MAX_HEIGHT=1080 (or 2160) for full quality.
+  youtubeMaxHeight: Number(process.env.YOUTUBE_MAX_HEIGHT || 720),
+  // Optional proxy for yt-dlp (e.g. a residential HTTP(S)/SOCKS5 proxy).
+  // Datacenter IPs (Render/AWS/GCP) get YouTube's strictest bot-checks; a
+  // residential proxy is the only fix when the IP itself is flagged.
+  // Example: YT_DLP_PROXY=http://user:pass@host:port
+  ytDlpProxy: (process.env.YT_DLP_PROXY || "").trim(),
 };
 
 export function isAdmin(userId: number): boolean {
