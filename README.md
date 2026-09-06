@@ -1,6 +1,6 @@
 # Telegram Video Downloader Bot
 
-A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, and Instagram using yt-dlp.
+A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, and Instagram using fast direct-download APIs first with yt-dlp as fallback.
 
 ## Features
 
@@ -9,6 +9,7 @@ A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, and Instag
 - **User stats**: Track download counts per user
 - **SQLite database**: Persistent storage for user data and download history
 - **Auto-cleanup**: Temporary files are automatically deleted
+- **Fast download pipeline**: YouTube resolves via Invidious (direct progressive MP4, no cookies/merge) and any platform can use a self-hosted Cobalt API — yt-dlp is the automatic fallback, so downloads are faster and survive YouTube bot-checks that would block yt-dlp alone
 
 ## Prerequisites
 
@@ -104,7 +105,9 @@ telegram/
 │   ├── database/
 │   │   └── index.ts          # SQLite queries & helpers
 │   ├── services/
-│   │   └── downloader.ts     # yt-dlp wrapper
+│   │   ├── downloader.ts     # yt-dlp wrapper + fast-path orchestration
+│   │   ├── invidious.ts      # YouTube fast path (direct MP4, no yt-dlp)
+│   │   └── cobalt.ts         # optional self-hosted Cobalt API (all platforms)
 │   ├── bot/
 │   │   ├── middlewares/
 │   │   │   └── auth.ts       # User tracking & admin check
@@ -146,10 +149,8 @@ telegram/
 - Or set `YT_DLP_PATH` in .env to full path
 
 **YouTube: "Sign in to confirm you're not a bot" / do I need cookies?**
-- No — cookies are OPTIONAL now. The bot tries anonymous clients
-  (`android` → `mweb` → `web_safari` → `web_embedded` → default chain, no login) FIRST, so most public videos
-  download with nothing uploaded. Cookies are only a fallback for age-gated,
-  private/members-only, or IP-rate-limited videos.
+- Usually NO extra setup now. YouTube downloads try a fast non-yt-dlp path FIRST: a public Invidious instance resolves the direct MP4 (`INVIDIOUS_ENABLED=true` by default) — the instance's IP talks to YouTube, not your server's, so datacenter bot-checks don't apply, and there's no JS challenge, no cookies, and no slow DASH merge. yt-dlp (anonymous clients, then cookies) is the automatic fallback.
+- Cookies are only a fallback for age-gated, private/members-only, or IP-rate-limited videos.
 - Honest limit: Render uses datacenter IPs, which get YouTube's strictest
   bot-checks. No flag fixes a hard IP block 100% — if EVERY video fails,
   first redeploy (the build installs a fresh yt-dlp nightly; a build older
@@ -176,12 +177,11 @@ telegram/
   in `.env` so yt-dlp reads cookies straight from your browser.
 
 **Slow YouTube downloads?**
-- The bot caps YouTube at 720p (`YOUTUBE_MAX_HEIGHT=720`, set `1080`/`0` for full
-  quality) — 720p is 3-5x smaller, so it downloads and uploads to Telegram much
-  faster and stays under the 50MB bot limit.
-- It also uses 10MB HTTP chunks (throttle bypass), 8 parallel fragments, fast
+- YouTube normally skips yt-dlp entirely now: the Invidious fast path downloads a single muxed MP4 (no ffmpeg video+audio merge, the slowest step on small hosts), capped at 720p (`YOUTUBE_MAX_HEIGHT=720`, set `1080`/`0` for full quality) — 720p is 3-5x smaller, so it downloads and uploads to Telegram much faster and stays under the 50MB bot limit.
+- The yt-dlp fallback path also uses 10MB HTTP chunks (throttle bypass), 8 parallel fragments, fast
   failover between player clients, and aria2c with 8 connections when installed
   (`build.sh` tries to install it; startup logs confirm).
+- For ALL platforms at maximum speed, self-host a Cobalt instance (Docker: `ghcr.io/imputnet/cobalt`, ~$2–5/mo on Railway) and set `COBALT_API_URL` — it's tried first and returns direct MP4s. (Public cobalt.tools is blocked for YouTube since 2025, so self-host only.)
 
 **TikTok: "blocked" / "Unexpected response from webpage"**
 - TikTok aggressively blocks server IPs and changes its API. The bot now:

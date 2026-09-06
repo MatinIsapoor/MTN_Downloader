@@ -23,6 +23,14 @@ services:
       # YouTube quality cap: 720p keeps downloads fast + under the 50MB limit.
       - key: YOUTUBE_MAX_HEIGHT
         value: 720
+      # Fast YouTube path (no setup): Invidious is ON by default. Set to false
+      # to force yt-dlp-only.
+      # - key: INVIDIOUS_ENABLED
+      #   value: true
+      # Optional: your self-hosted Cobalt instance (all platforms, fastest
+      # when set). Public cobalt.tools is blocked for YouTube — self-host only.
+      # - key: COBALT_API_URL
+      #   sync: false
       # Optional: residential proxy when the datacenter IP is hard-blocked.
       # - key: YT_DLP_PROXY
       #   sync: false

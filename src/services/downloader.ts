@@ -4,6 +4,8 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { config } from "../config";
 import { detectPlatform } from "../utils/platform";
+import { downloadYouTubeViaInvidious } from "./invidious";
+import { downloadViaCobalt, isCobaltConfigured } from "./cobalt";
 
 export interface DownloadResult {
   filePath: string;
@@ -311,6 +313,16 @@ export function logDownloaderDiagnostics(): void {
     );
   }
   console.log(`🔧 YouTube mode: cookie=${config.youtubeCookieMode}, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
+  console.log(
+    config.invidiousEnabled
+      ? `⚡ Fast path: Invidious ENABLED for YouTube (${config.invidiousInstances.length} instances, tried before yt-dlp)`
+      : "⚡ Fast path: Invidious disabled (INVIDIOUS_ENABLED=false) — YouTube goes straight to yt-dlp"
+  );
+  console.log(
+    isCobaltConfigured()
+      ? `⚡ Fast path: Cobalt API configured (${config.cobaltApiUrl}, tried first for all platforms)`
+      : "⚡ Fast path: Cobalt API not configured (set COBALT_API_URL to your self-hosted instance to enable)"
+  );
   console.log(
     hasAria2c()
       ? "🔧 Downloader: aria2c available (8-connection fast downloads enabled)"
@@ -892,13 +904,42 @@ export async function downloadVideo(
 ): Promise<DownloadResult> {
   ensureDownloadDir();
 
+  const platform = detectPlatform(url);
+
+  // --- Fast path 1: Cobalt API (all platforms, only when self-hosted instance configured).
+  // Single direct MP4, no yt-dlp, no ffmpeg merge — fastest when available.
+  if (isCobaltConfigured()) {
+    try {
+      console.log(`⚡ Trying fast path: Cobalt (${platform})…`);
+      const fast = await downloadViaCobalt(url, platform, onProgress);
+      if (fast) return fast;
+    } catch (err: any) {
+      if (err?.message?.startsWith("❌")) throw err; // definitive (gone/too large)
+      console.warn(`⚠️ Cobalt fast path failed, continuing: ${(err?.message || String(err)).slice(0, 150)}`);
+    }
+  }
+
+  // --- Fast path 2: Invidious (YouTube only, no setup needed).
+  // Bypasses yt-dlp's bot-checks (instance IP, not ours) and the slow DASH
+  // merge by downloading a single progressive MP4 with plain HTTPS.
+  if (platform === "youtube" && config.invidiousEnabled) {
+    try {
+      console.log("⚡ Trying fast path: Invidious (YouTube)…");
+      const fast = await downloadYouTubeViaInvidious(url, onProgress);
+      if (fast) return fast;
+      console.log("⚡ Invidious unavailable for this video, falling back to yt-dlp…");
+    } catch (err: any) {
+      if (err?.message?.startsWith("❌")) throw err; // definitive (too large)
+      console.warn(`⚠️ Invidious fast path failed, falling back to yt-dlp: ${(err?.message || String(err)).slice(0, 150)}`);
+    }
+  }
+
   if (!checkYtDlp()) {
     throw new Error(
       `yt-dlp not found at "${config.ytDlpPath}". Install it: https://github.com/yt-dlp/yt-dlp#installation`
     );
   }
 
-  const platform = detectPlatform(url);
   const id = crypto.randomBytes(6).toString("hex");
   const template = path.join(config.downloadDir, `${id}_%(title).100s.%(ext)s`);
 

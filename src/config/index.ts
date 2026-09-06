@@ -56,6 +56,37 @@ export const config = {
   // residential proxy is the only fix when the IP itself is flagged.
   // Example: YT_DLP_PROXY=http://user:pass@host:port
   ytDlpProxy: (process.env.YT_DLP_PROXY || "").trim(),
+  // --- Alternative (non-yt-dlp) download methods ---------------------------
+  // Invidious: fast YouTube path that bypasses yt-dlp entirely. A public
+  // Invidious instance resolves the progressive MP4 and we download it with
+  // plain HTTPS — no JS challenges, no cookies, no ffmpeg merge (single file
+  // = much faster). Tried BEFORE yt-dlp for YouTube; yt-dlp stays as fallback.
+  invidiousEnabled: (process.env.INVIDIOUS_ENABLED || "true").toLowerCase() !== "false",
+  // Comma-separated instance list (failover in order). Defaults are the
+  // long-lived public instances from the official Invidious docs.
+  invidiousInstances: (() => {
+    const custom = (process.env.INVIDIOUS_INSTANCES || "")
+      .split(",")
+      .map((s) => s.trim().replace(/\/+$/, ""))
+      .filter(Boolean);
+    return custom.length > 0
+      ? custom
+      : [
+          "https://yewtu.be",
+          "https://inv.nadeko.net",
+          "https://invidious.nerdvpn.de",
+          "https://iv.ggtyler.dev",
+          "https://invidious.jing.rocks",
+        ];
+  })(),
+  // Cobalt API (optional, all platforms): a self-hosted Cobalt instance
+  // (ghcr.io/imputnet/cobalt) resolves YouTube/TikTok/Instagram/X into a
+  // direct tunnel URL. Public cobalt.tools is blocked for YouTube since 2025,
+  // so this is strictly opt-in: set COBALT_API_URL to YOUR instance
+  // (e.g. https://your-app.up.railway.app). Tried FIRST when configured,
+  // yt-dlp stays as fallback. Optional COBALT_API_KEY for private instances.
+  cobaltApiUrl: (process.env.COBALT_API_URL || "").trim().replace(/\/+$/, ""),
+  cobaltApiKey: (process.env.COBALT_API_KEY || "").trim(),
 };
 
 export function isAdmin(userId: number): boolean {
