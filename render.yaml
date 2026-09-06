@@ -34,6 +34,10 @@ services:
       # Optional: residential proxy when the datacenter IP is hard-blocked.
       # - key: YT_DLP_PROXY
       #   sync: false
+      # Heal stale deploys without manual redeploys: best-effort `yt-dlp -U`
+      # on every boot (YouTube breaks builds older than ~2 weeks on its own).
+      - key: YTDLP_AUTO_UPDATE
+        value: true
       # Self-ping interval (min). Stays under Render's ~15 min idle spin-down.
       - key: KEEPALIVE_INTERVAL_MINUTES
         value: 10

@@ -11,7 +11,7 @@ import {
   setFindWaiting,
   handleFindText,
 } from "./bot/handlers/admin";
-import { cleanupOldFiles, logDownloaderDiagnostics, ensureCookiesFromEnv } from "./services/downloader";
+import { cleanupOldFiles, logDownloaderDiagnostics, ensureCookiesFromEnv, maybeAutoUpdateYtDlp } from "./services/downloader";
 import {
   handleHealthRequest,
   resolveKeepaliveConfig,
@@ -28,6 +28,9 @@ async function main() {
   // Downloader health: yt-dlp version, cookies, JS runtime, fallbacks
   // Restore cookies.txt from COOKIES_CONTENT first (Render-safe persistence).
   ensureCookiesFromEnv();
+  // Best-effort nightly self-update when YTDLP_AUTO_UPDATE=true (heals stale
+  // deploys without a manual redeploy), then log diagnostics.
+  await maybeAutoUpdateYtDlp();
   logDownloaderDiagnostics();
 
   // Create bot

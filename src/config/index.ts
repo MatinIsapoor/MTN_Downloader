@@ -61,9 +61,17 @@ export const config = {
   // Invidious instance resolves the progressive MP4 and we download it with
   // plain HTTPS — no JS challenges, no cookies, no ffmpeg merge (single file
   // = much faster). Tried BEFORE yt-dlp for YouTube; yt-dlp stays as fallback.
+  // NOTE (2026): YouTube pressure shrank the public network to a handful of
+  // instances and most now disable the API (/api/v1/* -> HTTP 403). The fast
+  // path is therefore best-effort: when every instance 403s we fall back to
+  // yt-dlp automatically. Keep INVIDIOUS_ENABLED=true — it still saves
+  // downloads whenever an instance has API on — but do NOT rely on it alone.
   invidiousEnabled: (process.env.INVIDIOUS_ENABLED || "true").toLowerCase() !== "false",
   // Comma-separated instance list (failover in order). Defaults are the
-  // long-lived public instances from the official Invidious docs.
+  // current official instances from https://docs.invidious.io/instances/
+  // (yewtu.be / iv.ggtyler.dev / invidious.jing.rocks are dead and removed).
+  // When INVIDIOUS_REFRESH=true (default) the bot also merges the live list
+  // from https://api.invidious.io/instances.json (api-enabled first).
   invidiousInstances: (() => {
     const custom = (process.env.INVIDIOUS_INSTANCES || "")
       .split(",")
@@ -72,13 +80,16 @@ export const config = {
     return custom.length > 0
       ? custom
       : [
-          "https://yewtu.be",
           "https://inv.nadeko.net",
           "https://invidious.nerdvpn.de",
-          "https://iv.ggtyler.dev",
-          "https://invidious.jing.rocks",
+          "https://yt.chocolatemoo53.com",
+          "https://invidious.tiekoetter.com",
+          "https://invidious.f5.si",
         ];
   })(),
+  // Refresh the Invidious list from api.invidious.io at runtime (default on).
+  // Set INVIDIOUS_REFRESH=false to use only INVIDIOUS_INSTANCES verbatim.
+  invidiousRefresh: (process.env.INVIDIOUS_REFRESH || "true").toLowerCase() !== "false",
   // Cobalt API (optional, all platforms): a self-hosted Cobalt instance
   // (ghcr.io/imputnet/cobalt) resolves YouTube/TikTok/Instagram/X into a
   // direct tunnel URL. Public cobalt.tools is blocked for YouTube since 2025,
@@ -87,6 +98,28 @@ export const config = {
   // yt-dlp stays as fallback. Optional COBALT_API_KEY for private instances.
   cobaltApiUrl: (process.env.COBALT_API_URL || "").trim().replace(/\/+$/, ""),
   cobaltApiKey: (process.env.COBALT_API_KEY || "").trim(),
+  // --- yt-dlp hardening (YouTube datacenter bot-checks) --------------------
+  // Force IPv4 for yt-dlp (default on): Render/IPv6 egress is often the
+  // flagged path while IPv4 still passes. Set YT_DLP_FORCE_IPV4=false to off.
+  ytDlpForceIpv4: (process.env.YT_DLP_FORCE_IPV4 || "true").toLowerCase() !== "false",
+  // Skip the webpage scrape for anonymous YouTube clients (default on):
+  // passes player_skip=webpage,configs so yt-dlp talks to the player API
+  // directly instead of fetching the watch page that triggers the bot wall.
+  youtubePlayerSkip: (process.env.YOUTUBE_PLAYER_SKIP || "true").toLowerCase() !== "false",
+  // Extra raw args appended to EVERY yt-dlp call, space-separated, e.g.:
+  // YT_DLP_EXTRA_ARGS=--sleep-requests 1 --sleep-interval 2
+  ytDlpExtraArgs: (() => {
+    const raw = (process.env.YT_DLP_EXTRA_ARGS || "").trim();
+    return raw ? raw.split(/\s+/).filter(Boolean) : [];
+  })(),
+  // PO-token provider (bgutil plugin) base URL, e.g. POT_SERVER_URL=http://127.0.0.1:4416
+  // When set, yt-dlp gets --extractor-args youtubepot-bgutilhttp:base_url=...
+  // (requires the bgutil plugin installed; see build.sh POT_PROVIDER=1).
+  potServerUrl: (process.env.POT_SERVER_URL || "").trim().replace(/\/+$/, ""),
+  // Best-effort `yt-dlp -U` self-update on boot (default off — Render's
+  // build already installs nightly; enable with YTDLP_AUTO_UPDATE=true to
+  // heal stale deploys without a manual redeploy).
+  ytdlpAutoUpdate: (process.env.YTDLP_AUTO_UPDATE || "false").toLowerCase() === "true",
 };
 
 export function isAdmin(userId: number): boolean {

@@ -100,6 +100,46 @@ async function fetchJsonWithTimeout(url: string, timeoutMs: number): Promise<any
   }
 }
 
+/**
+ * Live instance discovery: api.invidious.io/instances.json lists every known
+ * instance with health + api flag. Public instances increasingly disable the
+ * API (HTTP 403 on /api/v1/*), so prefer api-enabled, healthy instances.
+ * Cached per process; never throws (falls back to configured list).
+ */
+let _instanceCache: { at: number; list: string[] } | null = null;
+async function resolveInstances(): Promise<string[]> {
+  const configured = config.invidiousInstances;
+  if (!config.invidiousRefresh) return configured;
+  const now = Date.now();
+  if (_instanceCache && now - _instanceCache.at < 6 * 3600 * 1000) return _instanceCache.list;
+  try {
+    const data = await fetchJsonWithTimeout("https://api.invidious.io/instances.json", 10000);
+    // Format: [[domain, {uri, api, monitor...}], ...]
+    const rows: Array<[string, any]> = Array.isArray(data) ? data : [];
+    const healthy = rows
+      .map(([_, info]) => ({
+        uri: String(info?.uri || "").replace(/\/+$/, ""),
+        api: info?.api === true,
+        health: Number(info?.monitor?.statusClass === "success" ? 1 : 0),
+      }))
+      .filter((x) => x.uri.startsWith("https://"));
+    const apiOn = healthy.filter((x) => x.api).map((x) => x.uri);
+    const apiOff = healthy.filter((x) => !x.api).map((x) => x.uri);
+    // Merge: live api-enabled first, then configured (may overlap), then rest.
+    const merged = [...new Set([...apiOn, ...configured, ...apiOff])];
+    if (merged.length > 0) {
+      _instanceCache = { at: now, list: merged.slice(0, 12) };
+      if (apiOn.length !== merged.length) {
+        console.log(`⚡ Invidious: live discovery found ${apiOn.length} api-enabled instances of ${merged.length} total`);
+      }
+      return _instanceCache.list;
+    }
+  } catch (err: any) {
+    console.warn(`⚠️ Invidious instance refresh failed, using configured list: ${(err?.message || String(err)).slice(0, 100)}`);
+  }
+  return configured;
+}
+
 function sanitizeFileName(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
@@ -177,8 +217,10 @@ export async function downloadYouTubeViaInvidious(
   const videoId = extractYouTubeId(url);
   if (!videoId) return null;
 
+  const instances = await resolveInstances();
   const failures: string[] = [];
-  for (const instance of config.invidiousInstances) {
+  let apiDisabledCount = 0;
+  for (const instance of instances) {
     try {
       const data = await fetchJsonWithTimeout(
         `${instance}/api/v1/videos/${videoId}`,
@@ -224,10 +266,21 @@ export async function downloadYouTubeViaInvidious(
       const msg = err?.message || String(err);
       // Definitive failures: don't burn through every instance.
       if (msg.startsWith("❌")) throw err;
+      // HTTP 403 on /api/v1/* almost always means the instance disabled its
+      // public API (the 2026 norm — api=false on api.invidious.io), NOT that
+      // the video is gone. Count it separately for a clearer summary.
+      if (/HTTP 403/.test(msg)) apiDisabledCount++;
       console.warn(`⚠️ Invidious ${instance} failed for ${videoId}: ${msg.slice(0, 130)}`);
       failures.push(`${instance}: ${msg.slice(0, 80)}`);
     }
   }
-  console.warn(`⚠️ All Invidious instances failed: ${failures.join(" | ").slice(0, 300)}`);
+  if (apiDisabledCount === instances.length && instances.length > 0) {
+    console.warn(
+      `⚠️ All ${instances.length} Invidious instances refused the API (HTTP 403 = public API disabled, the 2026 norm). ` +
+        `Falling back to yt-dlp; self-hosting Invidious/Cobalt restores the fast path.`
+    );
+  } else {
+    console.warn(`⚠️ All Invidious instances failed: ${failures.join(" | ").slice(0, 300)}`);
+  }
   return null;
 }

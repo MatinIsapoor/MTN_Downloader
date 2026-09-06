@@ -49,6 +49,51 @@ export function getYtDlpVersion(): string | null {
   }
 }
 
+/** Age of the yt-dlp build in days (parsed from YYYY.MM.DD version), null when unknown. */
+export function ytDlpAgeDays(): number | null {
+  const v = getYtDlpVersion();
+  if (!v) return null;
+  const m = v.trim().match(/(\d{4})\.(\d{2})\.(\d{2})/);
+  if (!m) return null;
+  try {
+    const built = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return Math.floor((Date.now() - built) / 86400000);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort `yt-dlp -U` self-update on boot. Only runs when
+ * YTDLP_AUTO_UPDATE=true. Never throws — a failed update just logs.
+ */
+export async function maybeAutoUpdateYtDlp(): Promise<void> {
+  if (!config.ytdlpAutoUpdate) return;
+  try {
+    console.log("🔄 YTDLP_AUTO_UPDATE=true — attempting yt-dlp self-update…");
+    const { spawn: spawnProc } = await import("child_process");
+    await new Promise<void>((resolve) => {
+      const proc = spawnProc(config.ytDlpPath, ["-U"], { shell: false });
+      let out = "";
+      proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+      proc.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
+      const timer = setTimeout(() => { try { proc.kill(); } catch {} resolve(); }, 120000);
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        console.log(`🔄 yt-dlp -U exited (${code}): ${out.slice(-300).trim() || "no output"}`);
+        resolve();
+      });
+      proc.on("error", (err) => {
+        clearTimeout(timer);
+        console.warn(`⚠️ yt-dlp self-update failed: ${err.message.slice(0, 120)}`);
+        resolve();
+      });
+    });
+  } catch (err: any) {
+    console.warn(`⚠️ yt-dlp self-update failed: ${(err?.message || String(err)).slice(0, 120)}`);
+  }
+}
+
 // --- Capability probes (cached) -------------------------------------------
 
 let _hasNodeRuntime: boolean | null = null;
@@ -279,7 +324,14 @@ export function getCookiesStatus(): CookieStatus {
 /** Log yt-dlp / cookies / runtime status at startup so the admin sees problems early. */
 export function logDownloaderDiagnostics(): void {
   const version = getYtDlpVersion();
-  console.log(`🔧 yt-dlp version: ${version ?? "NOT FOUND"}`);
+  const age = ytDlpAgeDays();
+  console.log(`🔧 yt-dlp version: ${version ?? "NOT FOUND"}${age !== null ? ` (${age}d old)` : ""}`);
+  if (age !== null && age > 14) {
+    console.warn(
+      `⚠️ yt-dlp build is ${age} days old — YouTube changes its player constantly and builds older than ~2 weeks fail on their own. ` +
+        `Redeploy on Render now (build installs fresh nightly), or set YTDLP_AUTO_UPDATE=true for self-update on boot.`
+    );
+  }
   console.log(
     hasNodeRuntime()
       ? "🔧 JS runtime: node available (YouTube JS challenges enabled)"
@@ -312,10 +364,12 @@ export function logDownloaderDiagnostics(): void {
         `Most public videos work; age-gated/private ones need cookies (send cookies.txt to the bot).`
     );
   }
-  console.log(`🔧 YouTube mode: cookie=${config.youtubeCookieMode}, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
+  console.log(`🔧 YouTube mode: cookie=${config.youtubeCookieMode}, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}, player_skip=${config.youtubePlayerSkip ? "webpage,configs" : "off"}, ipv4=${config.ytDlpForceIpv4 ? "on" : "off"}`);
+  if (config.ytDlpExtraArgs.length > 0) console.log(`🔧 yt-dlp extra args: ${config.ytDlpExtraArgs.join(" ")}`);
+  if (config.potServerUrl) console.log(`🔧 PO-token provider: ${config.potServerUrl} (bgutil plugin required)`);
   console.log(
     config.invidiousEnabled
-      ? `⚡ Fast path: Invidious ENABLED for YouTube (${config.invidiousInstances.length} instances, tried before yt-dlp)`
+      ? `⚡ Fast path: Invidious ENABLED for YouTube (${config.invidiousInstances.length} configured + live refresh ${config.invidiousRefresh ? "on" : "off"}, tried before yt-dlp; note: most public instances now disable the API, so 403s here are expected)`
       : "⚡ Fast path: Invidious disabled (INVIDIOUS_ENABLED=false) — YouTube goes straight to yt-dlp"
   );
   console.log(
@@ -382,6 +436,14 @@ function buildCommonArgs(useCookies = true): string[] {
   }
   // Optional residential proxy — the only fix when the datacenter IP itself is flagged.
   if (config.ytDlpProxy) args.push("--proxy", config.ytDlpProxy);
+  // Render/IPv6 egress is frequently the flagged path; IPv4 still passes.
+  if (config.ytDlpForceIpv4) args.push("--force-ipv4");
+  // Optional PO-token sidecar (bgutil plugin): makes web/mweb clients look
+  // legitimate on flagged IPs. Only wired when POT_SERVER_URL is set AND the
+  // plugin is installed; otherwise ignored harmlessly.
+  if (config.potServerUrl) {
+    args.push("--extractor-args", `youtubepot-bgutilhttp:base_url=${config.potServerUrl}`);
+  }
   // Lets yt-dlp solve YouTube JS challenges instead of degrading extraction.
   if (hasNodeRuntime()) args.push("--js-runtimes", "node");
   // Speed: chunked HTTP bypasses per-connection throttling on progressive mp4s;
@@ -404,6 +466,8 @@ function buildCommonArgs(useCookies = true): string[] {
       "--downloader-args", "aria2c:-x 8 -s 8 -k 1M --min-split-size=1M"
     );
   }
+  // Admin escape hatch: raw extra args (e.g. sleep/throttle tuning).
+  if (config.ytDlpExtraArgs.length > 0) args.push(...config.ytDlpExtraArgs);
   return args;
 }
 
@@ -417,45 +481,63 @@ interface AttemptSpec {
 /**
  * Per-platform strategy chains.
  *
- * YouTube notes (verified by probing yt-dlp 2026.08.19 with bot-exact args,
- * no cookies, public video — exit 0 = works, FAIL = broken):
- * - android OK (returns progressive mp4, no merge needed — fastest path).
- * - mweb / web_safari / web_embedded OK (need `--js-runtimes node`, which the
- *   bot always passes; without a JS runtime their https formats vanish and
- *   every `-f` selector fails with "Requested format is not available").
- * - default (yt-dlp's own visionos→… chain) OK — kept last as a catch-all
- *   since it internally retries several clients (slower).
- * - tv FAIL ("The page needs to be reloaded") — YouTube moved TVHTML5 to a
- *   new JS challenge yt-dlp can't solve yet. Removed: it only wasted 10-20s
- *   and burned IP reputation on a guaranteed failure. Do NOT re-add it with
- *   cookies either — cookies+tv can invalidate the exported session.
- * - ios FAIL for our mp4 selector (HLS-only streams) — removed.
+ * YouTube notes (yt-dlp nightly, no cookies, public video — exit 0 = works):
+ * - android: progressive mp4, no merge — fastest; first.
+ * - mweb / web_safari / web_embedded: need `--js-runtimes node` (always
+ *   passed); without a JS runtime their https formats vanish and every `-f`
+ *   selector fails with "Requested format is not available".
+ * - tv_embedded / mediaconnect: embedded/TV-device APIs on different
+ *   endpoints with looser bot-checks — they occasionally pass on datacenter
+ *   IPs when web/android are all LOGIN_REQUIRED. Slower, so tried after the
+ *   main web clients but before the catch-all default.
+ * - default (yt-dlp's own client chain): catch-all, slower, kept last.
+ * - tv (plain TVHTML5) excluded: "The page needs to be reloaded" on current
+ *   player — guaranteed failure that only burns IP reputation. ios excluded:
+ *   HLS-only for our mp4 selector.
+ * - player_skip=webpage,configs (YOUTUBE_PLAYER_SKIP, default on): skip the
+ *   watch-page scrape that triggers the bot wall; talk to the player API
+ *   directly. Helps anonymous clients on flagged IPs.
  * - Order: anonymous first so public videos need no cookies; cookie clients
  *   only as fallback for age-gated/private/rate-limited videos. Cookie
  *   attempts are skipped entirely when no cookies are configured.
  */
+function youtubeClientArgs(client: string): string[] {
+  const skip = config.youtubePlayerSkip ? ";player_skip=webpage,configs" : "";
+  return ["--extractor-args", `youtube:player_client=${client}${skip}`];
+}
+
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
     const fmt = youtubeFormat();
     const anonymous: AttemptSpec[] = [
       {
         name: "android",
-        extraArgs: ["--extractor-args", "youtube:player_client=android", "-f", fmt],
+        extraArgs: [...youtubeClientArgs("android"), "-f", fmt],
         useCookies: false,
       },
       {
         name: "mweb",
-        extraArgs: ["--extractor-args", "youtube:player_client=mweb", "-f", fmt],
-        useCookies: false,
-      },
-      {
-        name: "web_safari",
-        extraArgs: ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt],
+        extraArgs: [...youtubeClientArgs("mweb"), "-f", fmt],
         useCookies: false,
       },
       {
         name: "web_embedded",
-        extraArgs: ["--extractor-args", "youtube:player_client=web_embedded", "-f", fmt],
+        extraArgs: [...youtubeClientArgs("web_embedded"), "-f", fmt],
+        useCookies: false,
+      },
+      {
+        name: "web_safari",
+        extraArgs: [...youtubeClientArgs("web_safari"), "-f", fmt],
+        useCookies: false,
+      },
+      {
+        name: "tv_embedded",
+        extraArgs: [...youtubeClientArgs("tv_embedded"), "-f", fmt],
+        useCookies: false,
+      },
+      {
+        name: "mediaconnect",
+        extraArgs: [...youtubeClientArgs("mediaconnect"), "-f", fmt],
         useCookies: false,
       },
       { name: "default", extraArgs: ["-f", fmt], useCookies: false },
@@ -463,7 +545,7 @@ function attemptsFor(platform: string): AttemptSpec[] {
     const withCookies: AttemptSpec[] = [
       {
         name: "web_safari",
-        extraArgs: ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt],
+        extraArgs: [...youtubeClientArgs("web_safari"), "-f", fmt],
         useCookies: true,
       },
       { name: "web", extraArgs: ["-f", fmt], useCookies: true },
@@ -826,10 +908,11 @@ function mapDownloadError(msg: string, platform: string): Error {
   }
   if (platform === "youtube" && isYouTubeBotCheck(msg)) {
     if (hasCookies()) {
-      // Anonymous clients (android/mweb/web_safari/web_embedded/default) + cookie clients
-      // (web_safari/web) all failed. The video likely needs a valid login
-      // (age-gated/private/members-only) or the datacenter IP is
-      // rate-limited. The saved session may be expired/invalid.
+      // Anonymous clients (android/mweb/web_embedded/web_safari/tv_embedded/
+      // mediaconnect/default) + cookie clients (web_safari/web) all failed.
+      // The video likely needs a valid login (age-gated/private/members-only)
+      // or the datacenter IP is rate-limited. The saved session may be
+      // expired/invalid.
       const status = getCookiesStatus();
       console.error(
         `❌ YouTube bot-check hit DESPITE cookies (${describeCookieFile()}). ` +
@@ -849,18 +932,20 @@ function mapDownloadError(msg: string, platform: string): Error {
       );
     }
     console.error(
-      "❌ YouTube bot-check hit with NO cookies configured (anonymous clients android/mweb/web_safari/web_embedded/default all blocked). " +
+      "❌ YouTube bot-check hit with NO cookies configured (anonymous clients android/mweb/web_embedded/web_safari/tv_embedded/mediaconnect/default all blocked). " +
         "This video needs a login (age-gated/private) or the server IP is rate-limited, or yt-dlp is stale."
     );
     return new Error(
       "❌ YouTube blocked this download (bot verification, no cookies on file).\n\n" +
       "Most public videos work without cookies — this one doesn't (age-gated, private, " +
       "or the server IP is temporarily rate-limited: wait ~1 hour and retry).\n\n" +
-      "🔧 Admin: for login-gated videos, send a logged-in `cookies.txt` to the bot " +
-      "(or run /cookies for status). No restart needed.\n" +
-      "If EVERY video fails: redeploy on Render (the build installs a fresh yt-dlp nightly — " +
-      "a build more than ~2 weeks old fails on its own as YouTube changes its player), then if it " +
-      "persists, the datacenter IP is flagged — set YT_DLP_PROXY to a residential proxy."
+      "🔧 Admin triage (in order):\n" +
+      "1. Send a DIFFERENT public YouTube link — if that works, only this video is login-walled (cookies are the only fix).\n" +
+      "2. If EVERY video fails: redeploy on Render (the build installs a fresh yt-dlp nightly — " +
+      "a build more than ~2 weeks old fails on its own as YouTube changes its player; or set YTDLP_AUTO_UPDATE=true), then if it " +
+      "persists, the datacenter IP is flagged — set YT_DLP_PROXY to a residential proxy.\n" +
+      "3. For login-gated videos, send a logged-in `cookies.txt` to the bot " +
+      "(or run /cookies for status). No restart needed."
     );
   }
   if (platform === "tiktok" && isTikTokBlock(msg)) {
