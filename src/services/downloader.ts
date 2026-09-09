@@ -4,8 +4,9 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { config } from "../config";
 import { detectPlatform } from "../utils/platform";
-import { downloadYouTubeViaInvidious } from "./invidious";
 import { downloadViaCobalt, isCobaltConfigured } from "./cobalt";
+import { downloadYouTubeCookieFree } from "./youtube";
+import { downloadPinterest } from "./pinterest";
 
 export interface DownloadResult {
   filePath: string;
@@ -279,25 +280,6 @@ export function ensureCookiesFromEnv(): void {
   }
 }
 
-/** Describe the cookie file so the admin can tell valid vs stale/missing at a glance. */
-function describeCookieFile(): string {
-  if (config.cookiesFromBrowser) return `reading from browser "${config.cookiesFromBrowser}"`;
-  if (config.cookiesContent) {
-    try {
-      const raw = fs.readFileSync(config.cookiesPath, "utf8");
-      return `${validateCookiesContent(raw).detail} [managed via COOKIES_CONTENT]`;
-    } catch {
-      return "COOKIES_CONTENT is set but cookies file is missing (will be restored on next boot)";
-    }
-  }
-  try {
-    const raw = fs.readFileSync(config.cookiesPath, "utf8");
-    return validateCookiesContent(raw).detail;
-  } catch {
-    return "unreadable";
-  }
-}
-
 /** Public status for the /cookies admin command. */
 export function getCookiesStatus(): CookieStatus {
   if (config.cookiesFromBrowser) {
@@ -364,13 +346,18 @@ export function logDownloaderDiagnostics(): void {
         `Most public videos work; age-gated/private ones need cookies (send cookies.txt to the bot).`
     );
   }
-  console.log(`🔧 YouTube mode: cookie=${config.youtubeCookieMode}, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}, player_skip=${config.youtubePlayerSkip ? "webpage,configs" : "off"}, ipv4=${config.ytDlpForceIpv4 ? "on" : "off"}`);
+  console.log(`🔧 YouTube mode: COOKIE-FREE (no yt-dlp, no cookies) — Cobalt → Invidious → Piped, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
   if (config.ytDlpExtraArgs.length > 0) console.log(`🔧 yt-dlp extra args: ${config.ytDlpExtraArgs.join(" ")}`);
   if (config.potServerUrl) console.log(`🔧 PO-token provider: ${config.potServerUrl} (bgutil plugin required)`);
   console.log(
     config.invidiousEnabled
-      ? `⚡ Fast path: Invidious ENABLED for YouTube (${config.invidiousInstances.length} configured + live refresh ${config.invidiousRefresh ? "on" : "off"}, tried before yt-dlp; note: most public instances now disable the API, so 403s here are expected)`
-      : "⚡ Fast path: Invidious disabled (INVIDIOUS_ENABLED=false) — YouTube goes straight to yt-dlp"
+      ? `⚡ YouTube: Invidious ENABLED (${config.invidiousInstances.length} configured + live refresh ${config.invidiousRefresh ? "on" : "off"})`
+      : "⚡ YouTube: Invidious disabled (INVIDIOUS_ENABLED=false)"
+  );
+  console.log(
+    config.pipedEnabled
+      ? `⚡ YouTube: Piped ENABLED (${config.pipedInstances.length} instances, tried after Invidious)`
+      : "⚡ YouTube: Piped disabled (PIPED_ENABLED=false)"
   );
   console.log(
     isCobaltConfigured()
@@ -409,13 +396,6 @@ function hasAria2c(): boolean {
     }
   }
   return _hasAria2c;
-}
-
-/** Resolution-capped muxed-mp4 selector: 720p default = 3-5x smaller = much faster. */
-function youtubeFormat(): string {
-  const h = config.youtubeMaxHeight;
-  if (h > 0) return `b[height<=${h}][ext=mp4]/b[ext=mp4]/b`;
-  return "b[ext=mp4]/b";
 }
 
 /** Extra yt-dlp args derived from local capabilities: auth cookies + JS runtime. */
@@ -479,82 +459,19 @@ interface AttemptSpec {
 }
 
 /**
- * Per-platform strategy chains.
+ * Per-platform yt-dlp strategy chains.
  *
- * YouTube notes (yt-dlp nightly, no cookies, public video — exit 0 = works):
- * - android: progressive mp4, no merge — fastest; first.
- * - mweb / web_safari / web_embedded: need `--js-runtimes node` (always
- *   passed); without a JS runtime their https formats vanish and every `-f`
- *   selector fails with "Requested format is not available".
- * - tv_embedded / mediaconnect: embedded/TV-device APIs on different
- *   endpoints with looser bot-checks — they occasionally pass on datacenter
- *   IPs when web/android are all LOGIN_REQUIRED. Slower, so tried after the
- *   main web clients but before the catch-all default.
- * - default (yt-dlp's own client chain): catch-all, slower, kept last.
- * - tv (plain TVHTML5) excluded: "The page needs to be reloaded" on current
- *   player — guaranteed failure that only burns IP reputation. ios excluded:
- *   HLS-only for our mp4 selector.
- * - player_skip=webpage,configs (YOUTUBE_PLAYER_SKIP, default on): skip the
- *   watch-page scrape that triggers the bot wall; talk to the player API
- *   directly. Helps anonymous clients on flagged IPs.
- * - Order: anonymous first so public videos need no cookies; cookie clients
- *   only as fallback for age-gated/private/rate-limited videos. Cookie
- *   attempts are skipped entirely when no cookies are configured.
+ * NOTE: YouTube NO LONGER uses yt-dlp at all — it goes through the
+ * cookie-free pipeline (Cobalt → Invidious → Piped, see youtube.ts), so
+ * there is no "youtube" entry here. Pinterest tries direct scraping first
+ * (pinterest.ts) and only falls back to yt-dlp below.
  */
-function youtubeClientArgs(client: string): string[] {
-  const skip = config.youtubePlayerSkip ? ";player_skip=webpage,configs" : "";
-  return ["--extractor-args", `youtube:player_client=${client}${skip}`];
-}
-
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
-    const fmt = youtubeFormat();
-    const anonymous: AttemptSpec[] = [
-      {
-        name: "android",
-        extraArgs: [...youtubeClientArgs("android"), "-f", fmt],
-        useCookies: false,
-      },
-      {
-        name: "mweb",
-        extraArgs: [...youtubeClientArgs("mweb"), "-f", fmt],
-        useCookies: false,
-      },
-      {
-        name: "web_embedded",
-        extraArgs: [...youtubeClientArgs("web_embedded"), "-f", fmt],
-        useCookies: false,
-      },
-      {
-        name: "web_safari",
-        extraArgs: [...youtubeClientArgs("web_safari"), "-f", fmt],
-        useCookies: false,
-      },
-      {
-        name: "tv_embedded",
-        extraArgs: [...youtubeClientArgs("tv_embedded"), "-f", fmt],
-        useCookies: false,
-      },
-      {
-        name: "mediaconnect",
-        extraArgs: [...youtubeClientArgs("mediaconnect"), "-f", fmt],
-        useCookies: false,
-      },
-      { name: "default", extraArgs: ["-f", fmt], useCookies: false },
-    ];
-    const withCookies: AttemptSpec[] = [
-      {
-        name: "web_safari",
-        extraArgs: [...youtubeClientArgs("web_safari"), "-f", fmt],
-        useCookies: true,
-      },
-      { name: "web", extraArgs: ["-f", fmt], useCookies: true },
-    ];
-    if (config.youtubeCookieMode === "never") return anonymous;
-    if (config.youtubeCookieMode === "cookies") return [...withCookies, ...anonymous];
-    // "auto" (default): anonymous first; downloadVideo() drops the cookie
-    // attempts when no cookies are configured, saving wasted retries.
-    return [...anonymous, ...withCookies];
+    // Unused — YouTube is handled by downloadYouTubeCookieFree() before
+    // any yt-dlp code runs. Kept as a guard so a future caller can't
+    // silently route YouTube back through yt-dlp.
+    return [];
   }
   if (platform === "tiktok") {
     const attempts: AttemptSpec[] = [];
@@ -568,7 +485,7 @@ function attemptsFor(platform: string): AttemptSpec[] {
     attempts.push({ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true });
     return attempts;
   }
-  if (platform === "instagram" || platform === "twitter") {
+  if (platform === "instagram" || platform === "twitter" || platform === "pinterest") {
     return [{ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true }];
   }
   return [{ name: "default", extraArgs: ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"], useCookies: true }];
@@ -907,45 +824,14 @@ function mapDownloadError(msg: string, platform: string): Error {
     return new Error("❌ Requested format not available.");
   }
   if (platform === "youtube" && isYouTubeBotCheck(msg)) {
-    if (hasCookies()) {
-      // Anonymous clients (android/mweb/web_embedded/web_safari/tv_embedded/
-      // mediaconnect/default) + cookie clients (web_safari/web) all failed.
-      // The video likely needs a valid login (age-gated/private/members-only)
-      // or the datacenter IP is rate-limited. The saved session may be
-      // expired/invalid.
-      const status = getCookiesStatus();
-      console.error(
-        `❌ YouTube bot-check hit DESPITE cookies (${describeCookieFile()}). ` +
-        `The cookies are expired/invalid — refresh them (no restart needed).`
-      );
-      const hint = status.valid
-        ? "The file looks OK, so YouTube is likely rate-limiting this server's IP — wait ~1 hour and try again, then refresh cookies if it persists."
-        : `Cookie problem: ${status.detail}.`;
-      return new Error(
-        "❌ YouTube still blocked this download — the saved cookies were rejected (expired or logged-out).\n\n" +
-        `${hint}\n\n` +
-        "🔧 Admin: send a fresh `cookies.txt` to the bot (it updates instantly, no restart), " +
-        "or run /cookies for status. Export tip: log in at youtube.com in a FRESH private window, " +
-        "export immediately, then close the window without logging out. " +
-        "On Render also paste the file into the COOKIES_CONTENT env var so it survives restarts. " +
-        "Use a throwaway Google account — downloader sessions get flagged."
-      );
-    }
-    console.error(
-      "❌ YouTube bot-check hit with NO cookies configured (anonymous clients android/mweb/web_embedded/web_safari/tv_embedded/mediaconnect/default all blocked). " +
-        "This video needs a login (age-gated/private) or the server IP is rate-limited, or yt-dlp is stale."
-    );
+    // YouTube no longer uses yt-dlp/cookies — this branch only fires if a
+    // provider echoed YouTube's own bot-wall text inside its error payload.
+    console.error("❌ YouTube provider reported a bot-check/login wall for this video.");
     return new Error(
-      "❌ YouTube blocked this download (bot verification, no cookies on file).\n\n" +
-      "Most public videos work without cookies — this one doesn't (age-gated, private, " +
-      "or the server IP is temporarily rate-limited: wait ~1 hour and retry).\n\n" +
-      "🔧 Admin triage (in order):\n" +
-      "1. Send a DIFFERENT public YouTube link — if that works, only this video is login-walled (cookies are the only fix).\n" +
-      "2. If EVERY video fails: redeploy on Render (the build installs a fresh yt-dlp nightly — " +
-      "a build more than ~2 weeks old fails on its own as YouTube changes its player; or set YTDLP_AUTO_UPDATE=true), then if it " +
-      "persists, the datacenter IP is flagged — set YT_DLP_PROXY to a residential proxy.\n" +
-      "3. For login-gated videos, send a logged-in `cookies.txt` to the bot " +
-      "(or run /cookies for status). No restart needed."
+      "❌ YouTube blocked this download on every cookie-free provider (Cobalt, Invidious, Piped).\n\n" +
+      "Most public videos work — this one is likely age-restricted, private, or all public " +
+      "instances are rate-limited right now. Wait a few minutes and retry, or try a different video.\n\n" +
+      "🔧 Admin: for maximum reliability, self-host a Cobalt instance (ghcr.io/imputnet/cobalt) and set COBALT_API_URL."
     );
   }
   if (platform === "tiktok" && isTikTokBlock(msg)) {
@@ -955,33 +841,24 @@ function mapDownloadError(msg: string, platform: string): Error {
     );
   }
   if (platform === "youtube" && msg.includes("Failed to extract any player response")) {
-    // yt-dlp got zero usable player data from ANY client. On a datacenter IP
-    // this is the harsh form of the login-wall/rate-limit (elsewhere it
-    // surfaces as "Sign in to confirm you're not a bot"); on an old build it
-    // just means yt-dlp predates YouTube's current player.
-    console.error(
-      `❌ YouTube returned no player response for this video (all clients failed).`
-    );
+    // A provider returned no playable data for this video.
+    console.error(`❌ YouTube returned no player response for this video (all providers failed).`);
     return new Error(
       "❌ YouTube returned no playable data for this video.\n\n" +
-      "Most likely, in order: (1) this video is login-walled by YouTube " +
-      "(age-restricted/private — these fail on every client even outside Render, " +
-      "so a logged-in `cookies.txt` is the only fix), " +
-      "(2) your Render build is stale — redeploy so the build installs a fresh " +
-      "yt-dlp nightly (builds older than ~2 weeks die on their own as YouTube " +
-      "changes its player), " +
-      "(3) the server IP is hard-blocked — wait ~1 hour or set YT_DLP_PROXY.\n\n" +
-      "🔧 Admin: run /cookies for status; to test the video, open it logged-OUT " +
-      "in an incognito window — if YouTube asks you to sign in, cookies are mandatory."
+      "Most likely the video is login-walled (age-restricted/private — hidden from " +
+      "anonymous APIs) or every public instance is rate-limited right now. " +
+      "Wait a few minutes and retry, or try a different public video."
     );
   }
   return new Error(`❌ Download failed:\n${msg.slice(0, 800)}`);
 }
 
 /**
- * Download video using yt-dlp.
- * Handles TikTok / YouTube / X-Twitter / Instagram.
- * Returns path to downloaded mp4 file.
+ * Download media from a supported URL.
+ * - YouTube: cookie-free pipeline (Cobalt → Invidious → Piped). NO yt-dlp, NO cookies.
+ * - Pinterest: direct scraping (no login/cookies), yt-dlp as fallback.
+ * - TikTok / X-Twitter / Instagram: yt-dlp (+ TikTok fallback providers).
+ * Returns the path to the downloaded file (mp4, or image for Pinterest pins).
  */
 export async function downloadVideo(
   url: string,
@@ -991,8 +868,30 @@ export async function downloadVideo(
 
   const platform = detectPlatform(url);
 
-  // --- Fast path 1: Cobalt API (all platforms, only when self-hosted instance configured).
-  // Single direct MP4, no yt-dlp, no ffmpeg merge — fastest when available.
+  // --- YouTube: cookie-free ONLY (never yt-dlp, never cookies) --------------
+  if (platform === "youtube") {
+    return downloadYouTubeCookieFree(url, onProgress);
+  }
+
+  // --- Pinterest: direct scraping first (no login/cookies needed) -----------
+  if (platform === "pinterest") {
+    try {
+      console.log("📌 Trying direct Pinterest download…");
+      return await downloadPinterest(url, onProgress);
+    } catch (err: any) {
+      // Definitive failures (gone/private/too large): don't waste time on yt-dlp.
+      if (err?.message?.startsWith("❌")) {
+        const msg = String(err.message);
+        if (/not found|private|deleted|Could not find|too large/i.test(msg)) throw err;
+      }
+      console.warn(`⚠️ Pinterest direct failed, falling back to yt-dlp: ${(err?.message || String(err)).slice(0, 150)}`);
+    }
+    // …fall through to the yt-dlp fallback below.
+  }
+
+  // --- Fast path: Cobalt API (TikTok/X/Instagram/Pinterest fallback).
+  // Single direct MP4, no ffmpeg merge — fastest when a self-hosted instance
+  // is configured via COBALT_API_URL.
   if (isCobaltConfigured()) {
     try {
       console.log(`⚡ Trying fast path: Cobalt (${platform})…`);
@@ -1001,21 +900,6 @@ export async function downloadVideo(
     } catch (err: any) {
       if (err?.message?.startsWith("❌")) throw err; // definitive (gone/too large)
       console.warn(`⚠️ Cobalt fast path failed, continuing: ${(err?.message || String(err)).slice(0, 150)}`);
-    }
-  }
-
-  // --- Fast path 2: Invidious (YouTube only, no setup needed).
-  // Bypasses yt-dlp's bot-checks (instance IP, not ours) and the slow DASH
-  // merge by downloading a single progressive MP4 with plain HTTPS.
-  if (platform === "youtube" && config.invidiousEnabled) {
-    try {
-      console.log("⚡ Trying fast path: Invidious (YouTube)…");
-      const fast = await downloadYouTubeViaInvidious(url, onProgress);
-      if (fast) return fast;
-      console.log("⚡ Invidious unavailable for this video, falling back to yt-dlp…");
-    } catch (err: any) {
-      if (err?.message?.startsWith("❌")) throw err; // definitive (too large)
-      console.warn(`⚠️ Invidious fast path failed, falling back to yt-dlp: ${(err?.message || String(err)).slice(0, 150)}`);
     }
   }
 
@@ -1044,15 +928,7 @@ export async function downloadVideo(
     "--no-mtime",
   ];
 
-  const attempts = attemptsFor(platform).filter((a) => {
-    // Skip cookie attempts when there is nothing to send — each one would
-    // just waste 10-30s failing the same way as the anonymous attempts.
-    if (platform === "youtube" && a.useCookies && !hasCookies()) {
-      console.log(`⏭️ Skipping ${platform} strategy "${a.name}" (no cookies configured)`);
-      return false;
-    }
-    return true;
-  });
+  const attempts = attemptsFor(platform);
   let lastError = "";
   const allErrors: string[] = [];
   for (const attempt of attempts) {

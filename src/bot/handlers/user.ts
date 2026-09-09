@@ -14,9 +14,10 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
       `👋 Hello ${name}!\n\n` +
         `Send me a link from:\n` +
         `🎵 TikTok\n` +
-        `▶️ YouTube (including Shorts)\n` +
+        `▶️ YouTube (including Shorts, no login needed)\n` +
         `🐦 X / Twitter\n` +
-        `📸 Instagram (Reels, Posts, Stories if public)\n\n` +
+        `📸 Instagram (Reels, Posts, Stories if public)\n` +
+        `📌 Pinterest (video & image pins, incl. pin.it links)\n\n` +
         `Just paste the URL and I'll send you the video *plus its music* 🎬🎵\n\n` +
         `Commands:\n` +
         `/start - Show this message\n` +
@@ -44,7 +45,8 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
         `• TikTok \\- \`tiktok\\.com\`\n` +
         `• YouTube \\- \`youtube\\.com\` / \`youtu\\.be\` \\(videos & shorts\\)\n` +
         `• X / Twitter \\- \`x\\.com\` / \`twitter\\.com\`\n` +
-        `• Instagram \\- \`instagram\\.com\`\n\n` +
+        `• Instagram \\- \`instagram\\.com\`\n` +
+        `• Pinterest \\- \`pinterest\\.com\` / \`pin\\.it\` \\(video & image pins\\)\n\n` +
         `*Tips:*\n` +
         `• Make sure the video is public\n` +
         `• Only one download at a time per user\n` +
@@ -87,9 +89,9 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
 
   bot.action("user_help", async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(
-      `ℹ️ Send me any TikTok, YouTube, X/Twitter or Instagram link and I'll send you the video plus its music (MP3)!`
-    );
+      await ctx.reply(
+        `ℹ️ Send me any TikTok, YouTube, X/Twitter, Instagram or Pinterest link and I'll send you the video (or image) plus its music (MP3) where available!`
+      );
   });
 
   // Main handler – any text containing URLs
@@ -105,7 +107,7 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
     if (urls.length === 0) return next(); // no URL, ignore
     if (supported.length === 0) {
       await ctx.reply(
-        "❌ No supported links found.\n\nSupported: TikTok, YouTube, X/Twitter, Instagram.\nExample: https://www.tiktok.com/@user/video/123..."
+        "❌ No supported links found.\n\nSupported: TikTok, YouTube, X/Twitter, Instagram, Pinterest.\nExample: https://www.tiktok.com/@user/video/123..."
       );
       return;
     }
@@ -162,29 +164,37 @@ export function registerUserHandlers(bot: Telegraf<Context>): void {
 
       const caption = `${platformEmoji(platform)} ${platform} video\n🔗 ${url}`;
 
-      // Send video + extract audio in parallel (saves ~2-5s per download)
-      const audioPromise = extractAudio(result.filePath).catch(() => null);
-      await ctx.replyWithVideo(Input.fromLocalFile(result.filePath, result.fileName), { caption });
+      const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "gif"]);
+      const isImage = IMAGE_EXTENSIONS.has((result.ext || "").toLowerCase());
 
-      // --- Music: extract the video's audio track and send it as MP3 ---
-      try {
-        await ctx.telegram
-          .editMessageText(ctx.chat.id, statusMsg.message_id, undefined, `🎵 Video sent! Extracting music…`)
-          .catch(() => {});
-        const audio = await audioPromise;
-        if (audio) {
-          tempFiles.push(audio.filePath);
-          const audioCaption = `🎵 ${platform} music\n🔗 ${url}`;
-          await ctx.replyWithAudio(Input.fromLocalFile(audio.filePath, audio.fileName), {
-            caption: audioCaption,
-            title: result.title || `${platform} music`,
-          });
-        }
-      } catch (audioErr: any) {
-        const audioMsg = audioErr?.message || "Unknown audio error";
-        console.warn(`⚠️ Audio extraction failed for ${url}: ${audioMsg.slice(0, 200)}`);
-        if (String(audioMsg).includes("no audio track")) {
-          await ctx.reply("⚠️ This video has no audio track, so there's no music file to send.").catch(() => {});
+      if (isImage) {
+        // Pinterest image pin: send as photo, no music to extract.
+        await ctx.replyWithPhoto(Input.fromLocalFile(result.filePath, result.fileName), { caption });
+      } else {
+        // Send video + extract audio in parallel (saves ~2-5s per download)
+        const audioPromise = extractAudio(result.filePath).catch(() => null);
+        await ctx.replyWithVideo(Input.fromLocalFile(result.filePath, result.fileName), { caption });
+
+        // --- Music: extract the video's audio track and send it as MP3 ---
+        try {
+          await ctx.telegram
+            .editMessageText(ctx.chat.id, statusMsg.message_id, undefined, `🎵 Video sent! Extracting music…`)
+            .catch(() => {});
+          const audio = await audioPromise;
+          if (audio) {
+            tempFiles.push(audio.filePath);
+            const audioCaption = `🎵 ${platform} music\n🔗 ${url}`;
+            await ctx.replyWithAudio(Input.fromLocalFile(audio.filePath, audio.fileName), {
+              caption: audioCaption,
+              title: result.title || `${platform} music`,
+            });
+          }
+        } catch (audioErr: any) {
+          const audioMsg = audioErr?.message || "Unknown audio error";
+          console.warn(`⚠️ Audio extraction failed for ${url}: ${audioMsg.slice(0, 200)}`);
+          if (String(audioMsg).includes("no audio track")) {
+            await ctx.reply("⚠️ This video has no audio track, so there's no music file to send.").catch(() => {});
+          }
         }
       }
 

@@ -1,15 +1,15 @@
 # Telegram Video Downloader Bot
 
-A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, and Instagram using fast direct-download APIs first with yt-dlp as fallback.
+A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, Instagram, and Pinterest — YouTube via cookie-free APIs (no yt-dlp, no cookies), everything else via yt-dlp with direct-download fallbacks.
 
 ## Features
 
-- **Multi-platform support**: TikTok, YouTube (including Shorts), X/Twitter, Instagram (Reels/Posts/Stories)
+- **Multi-platform support**: TikTok, YouTube (including Shorts, 100% cookie-free via Cobalt → Invidious → Piped), X/Twitter, Instagram (Reels/Posts/Stories), Pinterest (video & image pins, incl. pin.it links)
 - **Admin panel**: Manage users, view stats, send broadcast messages
 - **User stats**: Track download counts per user
 - **SQLite database**: Persistent storage for user data and download history
 - **Auto-cleanup**: Temporary files are automatically deleted
-- **Fast download pipeline**: YouTube resolves via Invidious (direct progressive MP4, no cookies/merge) and any platform can use a self-hosted Cobalt API — yt-dlp is the automatic fallback, so downloads are faster and survive YouTube bot-checks that would block yt-dlp alone
+- **Fast download pipeline**: YouTube never touches yt-dlp — it resolves a direct progressive MP4 through cookie-free providers (self-hosted Cobalt if configured, then public Invidious, then Piped), so there are no cookies to refresh and no datacenter bot-checks against your server IP. TikTok/X/Instagram use yt-dlp with direct-API fallbacks; Pinterest scrapes the pin page directly (og:video/og:image, no login) with yt-dlp as fallback
 
 ## Prerequisites
 
@@ -105,9 +105,12 @@ telegram/
 │   ├── database/
 │   │   └── index.ts          # SQLite queries & helpers
 │   ├── services/
-│   │   ├── downloader.ts     # yt-dlp wrapper + fast-path orchestration
-│   │   ├── invidious.ts      # YouTube fast path (direct MP4, no yt-dlp)
-│   │   └── cobalt.ts         # optional self-hosted Cobalt API (all platforms)
+│   │   ├── downloader.ts     # orchestrator: YouTube cookie-free, Pinterest direct, yt-dlp for the rest
+│   │   ├── youtube.ts        # YouTube cookie-free pipeline (Cobalt → Invidious → Piped, no yt-dlp)
+│   │   ├── invidious.ts      # YouTube provider #1 (direct MP4, no cookies)
+│   │   ├── piped.ts          # YouTube provider #2 (federated API, direct MP4, no cookies)
+│   │   ├── pinterest.ts      # Pinterest direct scraping (og:video/og:image, pin.it support, no login)
+│   │   └── cobalt.ts         # optional self-hosted Cobalt API (YouTube + all platforms)
 │   ├── bot/
 │   │   ├── middlewares/
 │   │   │   └── auth.ts       # User tracking & admin check

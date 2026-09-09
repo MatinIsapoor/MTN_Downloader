@@ -90,6 +90,28 @@ export const config = {
   // Refresh the Invidious list from api.invidious.io at runtime (default on).
   // Set INVIDIOUS_REFRESH=false to use only INVIDIOUS_INSTANCES verbatim.
   invidiousRefresh: (process.env.INVIDIOUS_REFRESH || "true").toLowerCase() !== "false",
+  // Piped: second cookie-free YouTube fast path (tried after Invidious, before
+  // giving up). Piped's federated network (~15 public instances in 2026)
+  // survives YouTube blocks better than Invidious (~3 left, most with API
+  // disabled). Plain HTTPS: GET {instance}/streams/{videoId} -> direct MP4.
+  // No yt-dlp, no cookies, no ffmpeg merge. Set PIPED_ENABLED=false to skip.
+  pipedEnabled: (process.env.PIPED_ENABLED || "true").toLowerCase() !== "false",
+  // Comma-separated Piped API instances (failover in order).
+  pipedInstances: (() => {
+    const custom = (process.env.PIPED_INSTANCES || "")
+      .split(",")
+      .map((s) => s.trim().replace(/\/+$/, ""))
+      .filter(Boolean);
+    return custom.length > 0
+      ? custom
+      : [
+          "https://pipedapi.adminforge.de",
+          "https://pipedapi.reallyaweso.me",
+          "https://pipedapi.leptons.xyz",
+          "https://api-piped.mha.fi",
+          "https://pipedapi.r4fo.com",
+        ];
+  })(),
   // Cobalt API (optional, all platforms): a self-hosted Cobalt instance
   // (ghcr.io/imputnet/cobalt) resolves YouTube/TikTok/Instagram/X into a
   // direct tunnel URL. Public cobalt.tools is blocked for YouTube since 2025,

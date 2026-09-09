@@ -100,7 +100,8 @@ export function registerAdminHandlers(bot: Telegraf<Context>): void {
           p.platform === "tiktok" ? "🎵" :
           p.platform === "youtube" ? "▶️" :
           p.platform === "twitter" ? "🐦" :
-          p.platform === "instagram" ? "📸" : "🎬";
+          p.platform === "instagram" ? "📸" :
+          p.platform === "pinterest" ? "📌" : "🎬";
         lines.push(`  ${emoji} ${p.platform}: *${p.count}*`);
       });
     }
