@@ -106,9 +106,10 @@ telegram/
 │   │   └── index.ts          # SQLite queries & helpers
 │   ├── services/
 │   │   ├── downloader.ts     # orchestrator: YouTube cookie-free, Pinterest direct, yt-dlp for the rest
-│   │   ├── youtube.ts        # YouTube cookie-free pipeline (Cobalt → Invidious → Piped, no yt-dlp)
-│   │   ├── invidious.ts      # YouTube provider #1 (direct MP4, no cookies)
-│   │   ├── piped.ts          # YouTube provider #2 (federated API, direct MP4, no cookies)
+│   │   ├── youtube.ts        # YouTube cookie-free pipeline (Cobalt → Piped → Invidious → Android direct, no yt-dlp)
+│   │   ├── invidious.ts      # YouTube provider (direct MP4, no cookies — most public instances API-disabled)
+│   │   ├── piped.ts          # YouTube provider (federated API + live discovery + retry, no cookies)
+│   │   ├── android.ts        # YouTube last resort (direct youtubei ANDROID player API, our own IP, no cookies)
 │   │   ├── pinterest.ts      # Pinterest direct scraping (og:video/og:image, pin.it support, no login)
 │   │   └── cobalt.ts         # optional self-hosted Cobalt API (YouTube + all platforms)
 │   ├── bot/

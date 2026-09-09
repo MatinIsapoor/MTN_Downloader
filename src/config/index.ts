@@ -92,12 +92,17 @@ export const config = {
   invidiousRefresh: (process.env.INVIDIOUS_REFRESH || "true").toLowerCase() !== "false",
   // Piped: primary cookie-free YouTube path (verified working — plain HTTPS:
   // GET {instance}/streams/{videoId} -> progressive MP4 via the instance's
-  // proxy, no yt-dlp, no cookies, no ffmpeg merge). The two defaults below
-  // were verified alive on 2026-09-09; PIPED_REFRESH (default on) additionally
-  // merges the live official list from the Piped docs repo so the bot
-  // self-heals when instances die. Set PIPED_ENABLED=false to skip.
+  // proxy, no yt-dlp, no cookies, no ffmpeg merge). YouTube bot-walls backend
+  // IPs *per video* (one backend serves video A while 500ing on video B), so
+  // the default list intentionally includes EVERY known public backend —
+  // dead ones fail fast (DNS/CF/502, usually <2s) and the rotation maximizes
+  // the chance that some backend isn't currently walled for YOUR video.
+  // PIPED_REFRESH (default on) additionally merges the live official list
+  // from the Piped docs repo so the bot self-heals without a redeploy.
+  // Set PIPED_ENABLED=false to skip.
   pipedEnabled: (process.env.PIPED_ENABLED || "true").toLowerCase() !== "false",
-  // Comma-separated Piped API instances (failover in order).
+  // Comma-separated Piped API instances (failover in order — verified-alive
+  // ones first, then the rest for rotation).
   pipedInstances: (() => {
     const custom = (process.env.PIPED_INSTANCES || "")
       .split(",")
@@ -110,6 +115,19 @@ export const config = {
           "https://api.piped.private.coffee",
           "https://pipedapi.orangenet.cc",
           "https://pipedapi.reallyaweso.me",
+          "https://pipedapi.kavin.rocks",
+          "https://pipedapi-libre.kavin.rocks",
+          "https://pipedapi.adminforge.de",
+          "https://pipedapi.leptons.xyz",
+          "https://pipedapi.nosebs.ru",
+          "https://piped-api.privacy.com.de",
+          "https://api.piped.yt",
+          "https://pipedapi.drgns.space",
+          "https://pipedapi.owo.si",
+          "https://piped-api.codespace.cz",
+          "https://pipedapi.darkness.services",
+          "https://api-piped.mha.fi",
+          "https://pipedapi.r4fo.com",
         ];
   })(),
   // Refresh the Piped list from the official docs repo at runtime (default

@@ -346,7 +346,7 @@ export function logDownloaderDiagnostics(): void {
         `Most public videos work; age-gated/private ones need cookies (send cookies.txt to the bot).`
     );
   }
-  console.log(`🔧 YouTube mode: COOKIE-FREE (no yt-dlp, no cookies) — Cobalt → Invidious → Piped, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
+  console.log(`🔧 YouTube mode: COOKIE-FREE (no yt-dlp, no cookies) — Cobalt → Piped → Invidious → Android direct, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
   if (config.ytDlpExtraArgs.length > 0) console.log(`🔧 yt-dlp extra args: ${config.ytDlpExtraArgs.join(" ")}`);
   if (config.potServerUrl) console.log(`🔧 PO-token provider: ${config.potServerUrl} (bgutil plugin required)`);
   console.log(

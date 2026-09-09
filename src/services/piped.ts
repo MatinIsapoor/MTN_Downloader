@@ -163,6 +163,84 @@ async function resolvePipedInstances(): Promise<string[]> {
   return configured;
 }
 
+/** Classified failure counts from the last Piped attempt (for smart errors). */
+export interface PipedSummary {
+  tried: number;
+  /** backend reachable but YouTube bot-walled it for this video (HTTP 500 w/ SignInConfirmNotBot, 429, proxy 502/403) */
+  botWalled: number;
+  /** video itself looks gone/private (backend says unavailable/deleted/private, or no streams on a healthy backend) */
+  notFound: number;
+  /** backend dead/unreachable (DNS, timeout, connection refused) */
+  unreachable: number;
+  other: number;
+}
+
+let _lastSummary: PipedSummary = { tried: 0, botWalled: 0, notFound: 0, unreachable: 0, other: 0 };
+export function getLastPipedSummary(): PipedSummary {
+  return { ..._lastSummary };
+}
+
+function classifyPipedError(msg: string): keyof Omit<PipedSummary, "tried"> {
+  if (
+    /SignInConfirmNotBot|temporarily blocked|HTTP 429|Too Many Requests|HTTP 50[02]|Bad Gateway|HTTP 403|Forbidden|blocked by administrative|Just a moment|Authorization Required/i.test(
+      msg
+    )
+  ) {
+    return "botWalled";
+  }
+  if (/unavailable|private|deleted|login-walled or gone|no progressive mp4 stream|no mp4 stream|NOT_FOUND|privateVideo|age|requires login/i.test(msg)) {
+    return "notFound";
+  }
+  if (/fetch failed|timeout|timed out|AbortError|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|EHOSTUNREACH|fetch failed/i.test(msg)) {
+    return "unreachable";
+  }
+  return "other";
+}
+
+async function tryPipedInstance(
+  instance: string,
+  videoId: string,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<DownloadResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${instance}/streams/${videoId}`, {
+      headers: { "User-Agent": UA, Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as PipedResponse;
+    if (data?.error) throw new Error(String(data.error).slice(0, 160));
+    const streams = Array.isArray(data?.videoStreams) ? data.videoStreams! : [];
+    const chosen = pickPipedStream(streams, config.youtubeMaxHeight);
+    if (!chosen?.url) {
+      throw new Error("no progressive mp4 stream (login-walled or gone?)");
+    }
+    const height = parseHeight(chosen);
+    console.log(
+      `⚡ Piped ${instance}: "${(data.title || videoId).slice(0, 60)}" ` +
+        `-> ${chosen.quality || (height ? height + "p" : "mp4")} progressive MP4`
+    );
+
+    const id = crypto.randomBytes(6).toString("hex");
+    const fileName = `${id}_${sanitizeFileName(data.title || videoId)}.mp4`;
+    const filePath = path.join(config.downloadDir, fileName);
+    if (!fs.existsSync(config.downloadDir)) fs.mkdirSync(config.downloadDir, { recursive: true });
+
+    await streamToFile(chosen.url, filePath, onProgress);
+    const stat = fs.statSync(filePath);
+    if (stat.size === 0) {
+      try { fs.unlinkSync(filePath); } catch {}
+      throw new Error("empty file");
+    }
+    console.log(`✅ Piped saved: ${fileName} (${(stat.size / 1048576).toFixed(1)} MB)`);
+    return { filePath, fileName, title: data.title, ext: "mp4", size: stat.size, platform: "youtube" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * Cookie-free YouTube path: Piped API.
  *
@@ -170,6 +248,11 @@ async function resolvePipedInstances(): Promise<string[]> {
  * bypasses datacenter "Sign in to confirm you're not a bot" walls —
  * plain HTTPS, no yt-dlp binary, no cookies, and the result is a single
  * progressive MP4 served through the instance's proxy (no ffmpeg merge).
+ *
+ * YouTube bot-walls backend IPs *per video*, so we rotate through every
+ * known backend, then — when failures look transient (bot-wall, not
+ * video-gone) — wait a few seconds and retry the backends that actually
+ * answered, since the wall is often momentary.
  *
  * API: GET {instance}/streams/{videoId}
  *   -> { title, videoStreams: [{url, quality, mimeType, videoOnly, ...}] }
@@ -185,54 +268,56 @@ export async function downloadYouTubeViaPiped(
   if (!videoId) return null;
 
   const instances = await resolvePipedInstances();
+  const summary: PipedSummary = { tried: 0, botWalled: 0, notFound: 0, unreachable: 0, other: 0 };
   const failures: string[] = [];
-  for (const instance of instances) {
+  const answered: string[] = []; // backends that returned HTTP (worth a retry)
+
+  const attempt = async (instance: string): Promise<DownloadResult | null> => {
+    summary.tried++;
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      let data: PipedResponse;
-      try {
-        const res = await fetch(`${instance}/streams/${videoId}`, {
-          headers: { "User-Agent": UA, Accept: "application/json" },
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        data = (await res.json()) as PipedResponse;
-      } finally {
-        clearTimeout(timeout);
-      }
-      if (data?.error) throw new Error(String(data.error).slice(0, 120));
-      const streams = Array.isArray(data?.videoStreams) ? data.videoStreams! : [];
-      const chosen = pickPipedStream(streams, config.youtubeMaxHeight);
-      if (!chosen?.url) {
-        throw new Error("no progressive mp4 stream (login-walled or gone?)");
-      }
-      const height = parseHeight(chosen);
-      console.log(
-        `⚡ Piped ${instance}: "${(data.title || videoId).slice(0, 60)}" ` +
-          `-> ${chosen.quality || (height ? height + "p" : "mp4")} progressive MP4`
-      );
-
-      const id = crypto.randomBytes(6).toString("hex");
-      const fileName = `${id}_${sanitizeFileName(data.title || videoId)}.mp4`;
-      const filePath = path.join(config.downloadDir, fileName);
-      if (!fs.existsSync(config.downloadDir)) fs.mkdirSync(config.downloadDir, { recursive: true });
-
-      await streamToFile(chosen.url, filePath, onProgress);
-      const stat = fs.statSync(filePath);
-      if (stat.size === 0) {
-        try { fs.unlinkSync(filePath); } catch {}
-        throw new Error("empty file");
-      }
-      console.log(`✅ Piped saved: ${fileName} (${(stat.size / 1048576).toFixed(1)} MB)`);
-      return { filePath, fileName, title: data.title, ext: "mp4", size: stat.size, platform: "youtube" };
+      return await tryPipedInstance(instance, videoId, onProgress);
     } catch (err: any) {
       const msg = err?.message || String(err);
-      if (msg.startsWith("❌")) throw err;
+      if (msg.startsWith("❌")) throw err; // definitive (too large) — stop everything
+      const kind = classifyPipedError(msg);
+      summary[kind]++;
+      if (kind !== "unreachable") answered.push(instance);
       console.warn(`⚠️ Piped ${instance} failed for ${videoId}: ${msg.slice(0, 130)}`);
       failures.push(`${instance}: ${msg.slice(0, 80)}`);
+      return null;
+    }
+  };
+
+  // Pass 1: rotate through every known backend.
+  for (const instance of instances) {
+    const hit = await attempt(instance);
+    if (hit) {
+      _lastSummary = summary;
+      return hit;
+    }
+    // Video itself is gone — other backends will say the same; stop early.
+    if (summary.notFound > 0 && summary.botWalled === 0 && summary.other === 0) break;
+  }
+
+  // Pass 2: transient bot-walls often clear within seconds — retry the
+  // backends that answered (skip DNS-dead ones), once.
+  const transient = summary.botWalled + summary.other;
+  if (transient > 0 && summary.notFound === 0) {
+    const retryList = [...new Set(answered)];
+    if (retryList.length > 0) {
+      console.log(`⚡ Piped: ${transient} transient failure(s), retrying ${retryList.length} answering backend(s) in 5s…`);
+      await new Promise((r) => setTimeout(r, 5000));
+      for (const instance of retryList) {
+        const hit = await attempt(instance);
+        if (hit) {
+          _lastSummary = summary;
+          return hit;
+        }
+      }
     }
   }
+
+  _lastSummary = summary;
   console.warn(`⚠️ All Piped instances failed: ${failures.join(" | ").slice(0, 300)}`);
   return null;
 }
