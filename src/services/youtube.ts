@@ -9,8 +9,9 @@ import type { DownloadProgress, DownloadResult } from "./downloader";
  *
  * Order (all plain HTTPS, single progressive MP4, no ffmpeg merge):
  *   1. Cobalt API (only when self-hosted COBALT_API_URL is configured)
- *   2. Invidious (public instances, no setup)
- *   3. Piped API (federated network — survives blocks best in 2026)
+ *   2. Piped API (primary public path — verified working backends first,
+ *      plus live discovery from the official instance list so it self-heals)
+ *   3. Invidious (legacy fallback — most public instances disabled their API)
  *
  * Each provider runs on ITS OWN server IP, so YouTube's datacenter
  * "Sign in to confirm you're not a bot" wall against our IP doesn't apply.
@@ -32,35 +33,36 @@ export async function downloadYouTubeCookieFree(
     }
   }
 
-  // --- 2) Invidious -------------------------------------------------------
-  if (config.invidiousEnabled) {
-    try {
-      console.log("⚡ YouTube: trying Invidious…");
-      const fast = await downloadYouTubeViaInvidious(url, onProgress);
-      if (fast) return fast;
-      console.log("⚡ YouTube: Invidious unavailable for this video, trying Piped…");
-    } catch (err: any) {
-      if (err?.message?.startsWith("❌")) throw err;
-      console.warn(`⚠️ YouTube Invidious failed, trying Piped: ${(err?.message || String(err)).slice(0, 150)}`);
-    }
-  }
-
-  // --- 3) Piped -----------------------------------------------------------
+  // --- 2) Piped (primary public path) -------------------------------------
   if (config.pipedEnabled) {
     try {
       console.log("⚡ YouTube: trying Piped…");
       const fast = await downloadYouTubeViaPiped(url, onProgress);
       if (fast) return fast;
+      console.log("⚡ YouTube: Piped unavailable for this video, trying Invidious…");
     } catch (err: any) {
       if (err?.message?.startsWith("❌")) throw err;
-      console.warn(`⚠️ YouTube Piped failed: ${(err?.message || String(err)).slice(0, 150)}`);
+      console.warn(`⚠️ YouTube Piped failed, trying Invidious: ${(err?.message || String(err)).slice(0, 150)}`);
+    }
+  }
+
+  // --- 3) Invidious (legacy fallback) -------------------------------------
+  if (config.invidiousEnabled) {
+    try {
+      console.log("⚡ YouTube: trying Invidious…");
+      const fast = await downloadYouTubeViaInvidious(url, onProgress);
+      if (fast) return fast;
+    } catch (err: any) {
+      if (err?.message?.startsWith("❌")) throw err;
+      console.warn(`⚠️ YouTube Invidious failed: ${(err?.message || String(err)).slice(0, 150)}`);
     }
   }
 
   throw new Error(
-    "❌ YouTube is unreachable right now — all cookie-free providers (Cobalt, Invidious, Piped) failed for this video.\n\n" +
-      "This is usually temporary (all public instances rate-limited at once) or the video is age-restricted/private and hidden from anonymous APIs.\n\n" +
-      "Try again in a few minutes, or try a different public video. " +
-      "For maximum reliability, self-host a Cobalt instance (ghcr.io/imputnet/cobalt) and set COBALT_API_URL."
+    "❌ YouTube download failed on every server (Cobalt, Piped, Invidious).\n\n" +
+      "Please try again in a few minutes or try a different public video — " +
+      "age-restricted/private videos are hidden from anonymous services and can't be downloaded.\n\n" +
+      "🔧 Admin: check the Render logs for the per-instance errors " +
+      "(`⚠️ Piped … failed`), or self-host Cobalt (ghcr.io/imputnet/cobalt) and set COBALT_API_URL for max reliability."
   );
 }

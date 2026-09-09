@@ -117,12 +117,59 @@ async function streamToFile(
 }
 
 /**
- * Cookie-free YouTube path #2: Piped API.
+ * Live backend discovery: the official Piped docs repo lists every known
+ * public instance. Public backends die regularly (verified Sep 2026: 10 of
+ * 17 known hosts dead), so merge the live list behind the configured one —
+ * the bot self-heals without a redeploy when instances rotate.
+ * Cached per process (6h); never throws (falls back to configured list).
+ */
+let _pipedCache: { at: number; list: string[] } | null = null;
+async function resolvePipedInstances(): Promise<string[]> {
+  const configured = config.pipedInstances;
+  if (!config.pipedRefresh) return configured;
+  const now = Date.now();
+  if (_pipedCache && now - _pipedCache.at < 6 * 3600 * 1000) return _pipedCache.list;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let md = "";
+    try {
+      const res = await fetch(
+        "https://raw.githubusercontent.com/TeamPiped/documentation/main/content/docs/public-instances/index.md",
+        { headers: { "User-Agent": UA }, signal: controller.signal }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      md = await res.text();
+    } finally {
+      clearTimeout(timeout);
+    }
+    const discovered = [...new Set(
+      [...md.matchAll(/https:\/\/[A-Za-z0-9.-]+/g)]
+        .map((m) => m[0].replace(/\/+$/, ""))
+        // Backend API hosts only — skip frontends (piped.video), github, etc.
+        .filter((u) => /piped/i.test(u) && !u.includes("github"))
+    )];
+    const merged = [...new Set([...configured, ...discovered])];
+    if (merged.length > 0) {
+      _pipedCache = { at: now, list: merged.slice(0, 20) };
+      if (discovered.length > 0) {
+        console.log(`⚡ Piped: live discovery added ${discovered.length} known backends (${merged.length} total to try)`);
+      }
+      return _pipedCache.list;
+    }
+  } catch (err: any) {
+    console.warn(`⚠️ Piped instance refresh failed, using configured list: ${(err?.message || String(err)).slice(0, 100)}`);
+  }
+  return configured;
+}
+
+/**
+ * Cookie-free YouTube path: Piped API.
  *
  * Each public Piped backend instance proxies YouTube on its own IP, so this
- * bypasses datacenter "Sign in to confirm you're not a bot" walls the same
- * way Invidious does — plain HTTPS, no yt-dlp binary, no cookies, and the
- * result is a single progressive MP4 (no ffmpeg merge).
+ * bypasses datacenter "Sign in to confirm you're not a bot" walls —
+ * plain HTTPS, no yt-dlp binary, no cookies, and the result is a single
+ * progressive MP4 served through the instance's proxy (no ffmpeg merge).
  *
  * API: GET {instance}/streams/{videoId}
  *   -> { title, videoStreams: [{url, quality, mimeType, videoOnly, ...}] }
@@ -137,8 +184,9 @@ export async function downloadYouTubeViaPiped(
   const videoId = extractYouTubeId(url);
   if (!videoId) return null;
 
+  const instances = await resolvePipedInstances();
   const failures: string[] = [];
-  for (const instance of config.pipedInstances) {
+  for (const instance of instances) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);

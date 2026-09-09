@@ -90,11 +90,12 @@ export const config = {
   // Refresh the Invidious list from api.invidious.io at runtime (default on).
   // Set INVIDIOUS_REFRESH=false to use only INVIDIOUS_INSTANCES verbatim.
   invidiousRefresh: (process.env.INVIDIOUS_REFRESH || "true").toLowerCase() !== "false",
-  // Piped: second cookie-free YouTube fast path (tried after Invidious, before
-  // giving up). Piped's federated network (~15 public instances in 2026)
-  // survives YouTube blocks better than Invidious (~3 left, most with API
-  // disabled). Plain HTTPS: GET {instance}/streams/{videoId} -> direct MP4.
-  // No yt-dlp, no cookies, no ffmpeg merge. Set PIPED_ENABLED=false to skip.
+  // Piped: primary cookie-free YouTube path (verified working — plain HTTPS:
+  // GET {instance}/streams/{videoId} -> progressive MP4 via the instance's
+  // proxy, no yt-dlp, no cookies, no ffmpeg merge). The two defaults below
+  // were verified alive on 2026-09-09; PIPED_REFRESH (default on) additionally
+  // merges the live official list from the Piped docs repo so the bot
+  // self-heals when instances die. Set PIPED_ENABLED=false to skip.
   pipedEnabled: (process.env.PIPED_ENABLED || "true").toLowerCase() !== "false",
   // Comma-separated Piped API instances (failover in order).
   pipedInstances: (() => {
@@ -105,13 +106,17 @@ export const config = {
     return custom.length > 0
       ? custom
       : [
-          "https://pipedapi.adminforge.de",
+          "https://pipedapi.ducks.party",
+          "https://api.piped.private.coffee",
+          "https://pipedapi.orangenet.cc",
           "https://pipedapi.reallyaweso.me",
-          "https://pipedapi.leptons.xyz",
-          "https://api-piped.mha.fi",
-          "https://pipedapi.r4fo.com",
         ];
   })(),
+  // Refresh the Piped list from the official docs repo at runtime (default
+  // on). Public Piped backends die regularly — live discovery keeps the
+  // failover list fresh without a redeploy. Set PIPED_REFRESH=false to use
+  // only PIPED_INSTANCES verbatim.
+  pipedRefresh: (process.env.PIPED_REFRESH || "true").toLowerCase() !== "false",
   // Cobalt API (optional, all platforms): a self-hosted Cobalt instance
   // (ghcr.io/imputnet/cobalt) resolves YouTube/TikTok/Instagram/X into a
   // direct tunnel URL. Public cobalt.tools is blocked for YouTube since 2025,

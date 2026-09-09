@@ -356,7 +356,7 @@ export function logDownloaderDiagnostics(): void {
   );
   console.log(
     config.pipedEnabled
-      ? `⚡ YouTube: Piped ENABLED (${config.pipedInstances.length} instances, tried after Invidious)`
+      ? `⚡ YouTube: Piped ENABLED (${config.pipedInstances.length} configured + live refresh ${config.pipedRefresh ? "on" : "off"}, primary public path)`
       : "⚡ YouTube: Piped disabled (PIPED_ENABLED=false)"
   );
   console.log(
