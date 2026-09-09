@@ -151,6 +151,12 @@ export const config = {
   // so it often succeeds where Piped/Invidious/youtubei are all walled.
   // ON by default; set YOUTUBE_YTDLP_FALLBACK=false to disable.
   youtubeYtdlpFallback: (process.env.YOUTUBE_YTDLP_FALLBACK || "true").toLowerCase() !== "false",
+  // yt-dlp FIRST for YouTube (default on): the local engine is the primary
+  // method — per-client rotation, JS challenges, signature deciphering,
+  // cookies, impersonation, proxy — and the HTTPS pipelines (Cobalt/Piped/
+  // Invidious/youtubei) are the fallback. Set YOUTUBE_YTDLP_FIRST=false to
+  // restore cookie-free-first order (HTTPS pipelines, yt-dlp last).
+  youtubeYtdlpFirst: (process.env.YOUTUBE_YTDLP_FIRST || "true").toLowerCase() !== "false",
   // Force IPv4 for yt-dlp (default on): Render/IPv6 egress is often the
   // flagged path while IPv4 still passes. Set YT_DLP_FORCE_IPV4=false to off.
   ytDlpForceIpv4: (process.env.YT_DLP_FORCE_IPV4 || "true").toLowerCase() !== "false",

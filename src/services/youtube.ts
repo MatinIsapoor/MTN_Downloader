@@ -7,17 +7,18 @@ import { downloadYouTubeViaYtDlp, getLastYtDlpSummary, ytDlpFallbackStatus } fro
 import type { DownloadProgress, DownloadResult } from "./downloader";
 
 /**
- * Cookie-free-first YouTube download pipeline.
+ * YouTube download pipeline (yt-dlp primary).
  *
  * Order (independent methods — each is another chance at the per-video wall):
- *   1. Cobalt API (only when self-hosted COBALT_API_URL is configured)
- *   2. Piped API (primary public path — verified working backends first,
- *      plus live discovery from the official instance list so it self-heals)
- *   3. Invidious (legacy fallback — most public instances disabled their API)
- *   4. youtubei multi-client (last plain-HTTPS resort — ANDROID → IOS →
+ *   1. yt-dlp (primary ENGINE: per-client rotation, JS challenges, signature
+ *      deciphering, cookies, impersonation, proxy) — first by default
+ *      (YOUTUBE_YTDLP_FIRST=false restores cookie-free-first order)
+ *   2. Cobalt API (only when self-hosted COBALT_API_URL is configured)
+ *   3. Piped API (public path — verified working backends first, plus live
+ *      discovery from the official instance list so it self-heals)
+ *   4. Invidious (legacy fallback — most public instances disabled their API)
+ *   5. youtubei multi-client (last plain-HTTPS resort — ANDROID → IOS →
  *      MWEB → WEB → TV rotations from our own IP, zero third parties)
- *   5. yt-dlp (final fallback — a different ENGINE: JS challenges, signature
- *      deciphering, per-client rotation, cookies, impersonation, proxy)
  *
  * Piped/Invidious run on THEIR OWN server IPs (our datacenter IP's bot-wall
  * doesn't apply to them); youtubei + yt-dlp use OUR IP but with different
@@ -28,7 +29,16 @@ export async function downloadYouTubeCookieFree(
   url: string,
   onProgress?: (p: DownloadProgress) => void
 ): Promise<DownloadResult> {
-  // --- 1) Cobalt (self-hosted, fastest when available) -------------------
+  let ytdlpWalled = false;
+
+  // --- 1) yt-dlp FIRST (primary method, when enabled) -----------------------
+  if (config.youtubeYtdlpFirst) {
+    const first = await tryYtDlp(url, onProgress);
+    if (first.result) return first.result;
+    ytdlpWalled = first.walled;
+  }
+
+  // --- 2) Cobalt (self-hosted, fastest when available) -------------------
   if (isCobaltConfigured()) {
     try {
       console.log("⚡ YouTube: trying Cobalt…");
@@ -40,7 +50,7 @@ export async function downloadYouTubeCookieFree(
     }
   }
 
-  // --- 2) Piped (primary public path) -------------------------------------
+  // --- 3) Piped (public path) ---------------------------------------------
   if (config.pipedEnabled) {
     try {
       console.log("⚡ YouTube: trying Piped…");
@@ -53,7 +63,7 @@ export async function downloadYouTubeCookieFree(
     }
   }
 
-  // --- 3) Invidious (legacy fallback) -------------------------------------
+  // --- 4) Invidious (legacy fallback) -------------------------------------
   if (config.invidiousEnabled) {
     try {
       console.log("⚡ YouTube: trying Invidious…");
@@ -65,7 +75,7 @@ export async function downloadYouTubeCookieFree(
     }
   }
 
-  // --- 4) youtubei multi-client (last plain-HTTPS resort, our own IP) ------
+  // --- 5) youtubei multi-client (last plain-HTTPS resort, our own IP) ------
   // Tracks whether OUR OWN IP was also walled, for the final error message.
   let androidWalled = false;
   try {
@@ -79,26 +89,39 @@ export async function downloadYouTubeCookieFree(
     if (/LOGIN_REQUIRED|not a bot|confirm you/i.test(msg)) androidWalled = true;
   }
 
-  // --- 5) yt-dlp (final fallback — different engine, our own IP) ------------
-  // Solves JS challenges, deciphers signatures, rotates player clients and
-  // can use cookies/proxy — often wins where plain-HTTPS pipelines lose.
-  let ytdlpWalled = false;
-  if (config.youtubeYtdlpFallback) {
-    try {
-      console.log("⚡ YouTube: trying yt-dlp fallback…");
-      const fast = await downloadYouTubeViaYtDlp(url, onProgress);
-      if (fast) return fast;
-      ytdlpWalled = getLastYtDlpSummary().walled > 0;
-    } catch (err: any) {
-      if (err?.message?.startsWith("❌")) throw err;
-      const msg = err?.message || String(err);
-      console.warn(`⚠️ YouTube yt-dlp fallback failed: ${msg.slice(0, 150)}`);
-      ytdlpWalled = /not a bot|LOGIN_REQUIRED|confirm you|player response|use --cookies/i.test(msg)
-        || getLastYtDlpSummary().walled > 0;
-    }
+  // --- yt-dlp LAST (only when not already tried first) ----------------------
+  if (!config.youtubeYtdlpFirst) {
+    const last = await tryYtDlp(url, onProgress);
+    if (last.result) return last.result;
+    ytdlpWalled = last.walled;
   }
 
   throw buildYouTubeError(androidWalled, ytdlpWalled);
+}
+
+/**
+ * One yt-dlp pass over YouTube (per-client rotation inside). Returns the
+ * file on success; otherwise { result: null, walled } so the caller can
+ * continue with the next pipeline method. Re-throws definitive ❌ errors.
+ */
+async function tryYtDlp(
+  url: string,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<{ result: DownloadResult | null; walled: boolean }> {
+  if (!config.youtubeYtdlpFallback) return { result: null, walled: false };
+  try {
+    console.log("⚡ YouTube: trying yt-dlp…");
+    const fast = await downloadYouTubeViaYtDlp(url, onProgress);
+    if (fast) return { result: fast, walled: false };
+    return { result: null, walled: getLastYtDlpSummary().walled > 0 };
+  } catch (err: any) {
+    if (err?.message?.startsWith("❌")) throw err;
+    const msg = err?.message || String(err);
+    console.warn(`⚠️ YouTube yt-dlp failed: ${msg.slice(0, 150)}`);
+    const walled = /not a bot|LOGIN_REQUIRED|confirm you|player response|use --cookies/i.test(msg)
+      || getLastYtDlpSummary().walled > 0;
+    return { result: null, walled };
+  }
 }
 
 /**
@@ -141,7 +164,7 @@ function buildYouTubeError(androidWalled = false, ytdlpWalled = false): Error {
     );
   }
   return new Error(
-    "❌ YouTube download failed on every method (Cobalt, Piped, Invidious, youtubei, yt-dlp).\n\n" +
+    "❌ YouTube download failed on every method (yt-dlp, Cobalt, Piped, Invidious, youtubei).\n\n" +
       "Please try again in a few minutes or try a different public video — " +
       "age-restricted/private videos are hidden from anonymous services and can't be downloaded.\n\n" +
       "🔧 Admin: check the Render logs for the per-method errors " +

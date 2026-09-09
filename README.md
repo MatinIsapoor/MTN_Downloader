@@ -1,15 +1,15 @@
 # Telegram Video Downloader Bot
 
-A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, Instagram, and Pinterest — YouTube via cookie-free-first APIs with a yt-dlp final fallback, everything else via yt-dlp with direct-download fallbacks.
+A Telegram bot that downloads videos from TikTok, YouTube, X/Twitter, Instagram, and Pinterest — YouTube via yt-dlp first with HTTPS fallbacks, everything else via yt-dlp with direct-download fallbacks.
 
 ## Features
 
-- **Multi-platform support**: TikTok, YouTube (including Shorts, cookie-free-first via Cobalt → Piped → Invidious → youtubei multi-client, yt-dlp final fallback), X/Twitter, Instagram (Reels/Posts/Stories), Pinterest (video & image pins, incl. pin.it links)
+- **Multi-platform support**: TikTok, YouTube (including Shorts, yt-dlp first with Cobalt → Piped → Invidious → youtubei multi-client as fallback), X/Twitter, Instagram (Reels/Posts/Stories), Pinterest (video & image pins, incl. pin.it links)
 - **Admin panel**: Manage users, view stats, send broadcast messages
 - **User stats**: Track download counts per user
 - **SQLite database**: Persistent storage for user data and download history
 - **Auto-cleanup**: Temporary files are automatically deleted
-- **Fast download pipeline**: YouTube tries cookie-free providers first (self-hosted Cobalt if configured, then public Piped, then Invidious, then youtubei multi-client) — no cookies to refresh and no datacenter bot-checks against your server IP on the third-party legs — with local yt-dlp as the final fallback (JS challenges, signature deciphering, per-client rotation, cookies, proxy) for videos the plain-HTTPS methods can't unlock. TikTok/X/Instagram use yt-dlp with direct-API fallbacks; Pinterest scrapes the pin page directly (og:video/og:image, no login) with yt-dlp as fallback
+- **Fast download pipeline**: YouTube uses local yt-dlp first (per-client rotation, JS challenges, cookies, proxy), falling back to cookie-free providers (self-hosted Cobalt if configured, then public Piped, then Invidious, then youtubei multi-client) when the engine is walled. TikTok/X/Instagram use yt-dlp with direct-API fallbacks; Pinterest scrapes the pin page directly (og:video/og:image, no login) with yt-dlp as fallback
 
 ## Prerequisites
 
@@ -106,11 +106,11 @@ telegram/
 │   │   └── index.ts          # SQLite queries & helpers
 │   ├── services/
 │   │   ├── downloader.ts     # orchestrator: YouTube cookie-free-first + yt-dlp fallback, Pinterest direct, yt-dlp for the rest
-│   │   ├── youtube.ts        # YouTube pipeline (Cobalt, Piped, Invidious, youtubei multi-client, yt-dlp fallback)
+│   │   ├── youtube.ts        # YouTube pipeline (yt-dlp first, then Cobalt, Piped, Invidious, youtubei multi-client)
 │   │   ├── invidious.ts      # YouTube provider (direct MP4, no cookies — most public instances API-disabled)
 │   │   ├── piped.ts          # YouTube provider (federated API + live discovery + retry, no cookies)
 │   │   ├── android.ts        # youtubei multi-client (ANDROID, IOS, MWEB, WEB, TV - our own IP, no third party)
-│   │   ├── youtubeYtdlp.ts   # YouTube FINAL fallback (local yt-dlp, per-client rotation + cookies/proxy)
+│   │   ├── youtubeYtdlp.ts   # YouTube method (local yt-dlp, per-client rotation + cookies/proxy), also used for TikTok/X/Instagram
 │   │   ├── pinterest.ts      # Pinterest direct scraping (og:video/og:image, pin.it support, no login)
 │   │   └── cobalt.ts         # optional self-hosted Cobalt API (YouTube + all platforms)
 │   ├── bot/

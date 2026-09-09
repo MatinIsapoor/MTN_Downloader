@@ -346,7 +346,7 @@ export function logDownloaderDiagnostics(): void {
         `Most public videos work; age-gated/private ones need cookies (send cookies.txt to the bot).`
     );
   }
-  console.log(`🔧 YouTube mode: cookie-free FIRST + yt-dlp LAST — Cobalt → Piped → Invidious → youtubei multi-client → yt-dlp fallback (${config.youtubeYtdlpFallback ? "ON" : "OFF"}), max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
+  console.log(`🔧 YouTube mode: yt-dlp PRIMARY + HTTPS fallbacks — yt-dlp ${config.youtubeYtdlpFirst ? "first" : "last"} (${config.youtubeYtdlpFallback ? "ON" : "OFF"}) → Cobalt → Piped → Invidious → youtubei multi-client, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
   if (config.ytDlpExtraArgs.length > 0) console.log(`🔧 yt-dlp extra args: ${config.ytDlpExtraArgs.join(" ")}`);
   if (config.potServerUrl) console.log(`🔧 PO-token provider: ${config.potServerUrl} (bgutil plugin required)`);
   console.log(
@@ -855,8 +855,9 @@ function mapDownloadError(msg: string, platform: string): Error {
 
 /**
  * Download media from a supported URL.
- * - YouTube: cookie-free FIRST (Cobalt → Piped → Invidious → youtubei
- *   multi-client), yt-dlp as the FINAL fallback (see youtube.ts).
+ * - YouTube: yt-dlp PRIMARY (per-client rotation, cookies/proxy), HTTPS
+ *   pipelines as fallback (Cobalt → Piped → Invidious → youtubei
+ *   multi-client) — see youtube.ts.
  * - Pinterest: direct scraping (no login/cookies), yt-dlp as fallback.
  * - TikTok / X-Twitter / Instagram: yt-dlp (+ TikTok fallback providers).
  * Returns the path to the downloaded file (mp4, or image for Pinterest pins).
@@ -869,7 +870,7 @@ export async function downloadVideo(
 
   const platform = detectPlatform(url);
 
-  // --- YouTube: cookie-free first, yt-dlp last (see youtube.ts) -------------
+  // --- YouTube: yt-dlp first, HTTPS pipelines as fallback (see youtube.ts) --
   if (platform === "youtube") {
     return downloadYouTubeCookieFree(url, onProgress);
   }
