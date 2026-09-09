@@ -346,7 +346,7 @@ export function logDownloaderDiagnostics(): void {
         `Most public videos work; age-gated/private ones need cookies (send cookies.txt to the bot).`
     );
   }
-  console.log(`🔧 YouTube mode: COOKIE-FREE (no yt-dlp, no cookies) — Cobalt → Piped → Invidious → Android direct, max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
+  console.log(`🔧 YouTube mode: cookie-free FIRST + yt-dlp LAST — Cobalt → Piped → Invidious → youtubei multi-client → yt-dlp fallback (${config.youtubeYtdlpFallback ? "ON" : "OFF"}), max-height=${config.youtubeMaxHeight === 0 ? "uncapped" : config.youtubeMaxHeight + "p"}`);
   if (config.ytDlpExtraArgs.length > 0) console.log(`🔧 yt-dlp extra args: ${config.ytDlpExtraArgs.join(" ")}`);
   if (config.potServerUrl) console.log(`🔧 PO-token provider: ${config.potServerUrl} (bgutil plugin required)`);
   console.log(
@@ -461,16 +461,16 @@ interface AttemptSpec {
 /**
  * Per-platform yt-dlp strategy chains.
  *
- * NOTE: YouTube NO LONGER uses yt-dlp at all — it goes through the
- * cookie-free pipeline (Cobalt → Invidious → Piped, see youtube.ts), so
- * there is no "youtube" entry here. Pinterest tries direct scraping first
+ * NOTE: YouTube has its OWN yt-dlp fallback (youtubeYtdlp.ts, wired as the
+ * final step of the YouTube pipeline in youtube.ts), so there is no
+ * "youtube" entry here. Pinterest tries direct scraping first
  * (pinterest.ts) and only falls back to yt-dlp below.
  */
 function attemptsFor(platform: string): AttemptSpec[] {
   if (platform === "youtube") {
-    // Unused — YouTube is handled by downloadYouTubeCookieFree() before
-    // any yt-dlp code runs. Kept as a guard so a future caller can't
-    // silently route YouTube back through yt-dlp.
+    // Unused — YouTube is handled by downloadYouTubeCookieFree() (which ends
+    // with its own yt-dlp fallback in youtubeYtdlp.ts). Kept as a guard so a
+    // future caller can't silently route YouTube through this generic chain.
     return [];
   }
   if (platform === "tiktok") {
@@ -855,7 +855,8 @@ function mapDownloadError(msg: string, platform: string): Error {
 
 /**
  * Download media from a supported URL.
- * - YouTube: cookie-free pipeline (Cobalt → Invidious → Piped). NO yt-dlp, NO cookies.
+ * - YouTube: cookie-free FIRST (Cobalt → Piped → Invidious → youtubei
+ *   multi-client), yt-dlp as the FINAL fallback (see youtube.ts).
  * - Pinterest: direct scraping (no login/cookies), yt-dlp as fallback.
  * - TikTok / X-Twitter / Instagram: yt-dlp (+ TikTok fallback providers).
  * Returns the path to the downloaded file (mp4, or image for Pinterest pins).
@@ -868,7 +869,7 @@ export async function downloadVideo(
 
   const platform = detectPlatform(url);
 
-  // --- YouTube: cookie-free ONLY (never yt-dlp, never cookies) --------------
+  // --- YouTube: cookie-free first, yt-dlp last (see youtube.ts) -------------
   if (platform === "youtube") {
     return downloadYouTubeCookieFree(url, onProgress);
   }

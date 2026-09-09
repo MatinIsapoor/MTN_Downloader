@@ -144,6 +144,13 @@ export const config = {
   cobaltApiUrl: (process.env.COBALT_API_URL || "").trim().replace(/\/+$/, ""),
   cobaltApiKey: (process.env.COBALT_API_KEY || "").trim(),
   // --- yt-dlp hardening (YouTube datacenter bot-checks) --------------------
+  // Final YouTube fallback: local yt-dlp with per-client rotation
+  // (android → ios → mweb → tv → default, anonymous first then cookies).
+  // This is a genuinely different method from the HTTPS pipelines above —
+  // it solves JS challenges, deciphers signatures, and can use cookies —
+  // so it often succeeds where Piped/Invidious/youtubei are all walled.
+  // ON by default; set YOUTUBE_YTDLP_FALLBACK=false to disable.
+  youtubeYtdlpFallback: (process.env.YOUTUBE_YTDLP_FALLBACK || "true").toLowerCase() !== "false",
   // Force IPv4 for yt-dlp (default on): Render/IPv6 egress is often the
   // flagged path while IPv4 still passes. Set YT_DLP_FORCE_IPV4=false to off.
   ytDlpForceIpv4: (process.env.YT_DLP_FORCE_IPV4 || "true").toLowerCase() !== "false",
