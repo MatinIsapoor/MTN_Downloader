@@ -3,7 +3,7 @@ import { downloadViaCobalt, isCobaltConfigured } from "./cobalt";
 import { downloadYouTubeViaInvidious } from "./invidious";
 import { downloadYouTubeViaPiped, getLastPipedSummary } from "./piped";
 import { downloadYouTubeViaAndroid } from "./android";
-import { downloadYouTubeViaYtDlp, getLastYtDlpSummary } from "./youtubeYtdlp";
+import { downloadYouTubeViaYtDlp, getLastYtDlpSummary, ytDlpFallbackStatus } from "./youtubeYtdlp";
 import type { DownloadProgress, DownloadResult } from "./downloader";
 
 /**
@@ -108,6 +108,15 @@ export async function downloadYouTubeCookieFree(
  */
 function buildYouTubeError(androidWalled = false, ytdlpWalled = false): Error {
   const s = getLastPipedSummary();
+  // Extra admin hint when the final fallback couldn't even run — otherwise
+  // the message looks identical to the pre-fallback era and hides the fix.
+  const ytdlpStatus = ytDlpFallbackStatus();
+  const ytdlpHint =
+    ytdlpStatus === "disabled"
+      ? "\n\n⚠️ Note for admin: the yt-dlp fallback is DISABLED (YOUTUBE_YTDLP_FALLBACK=false) — enable it for one more independent route."
+      : ytdlpStatus === "missing"
+        ? "\n\n⚠️ Note for admin: the yt-dlp fallback couldn't RUN here (no working yt-dlp binary — set YT_DLP_PATH, see server logs) — fix that for one more independent route."
+        : "";
   // Backends agreed the video itself is gone — say so plainly.
   if (s.notFound > 0 && s.botWalled === 0 && !androidWalled && !ytdlpWalled) {
     return new Error(
@@ -127,7 +136,8 @@ function buildYouTubeError(androidWalled = false, ytdlpWalled = false): Error {
       `❌ YouTube bot-blocked this video ${where} right now (its anti-bot wall is per-video and temporary).\n\n` +
         "Please try again in a few minutes — a different server usually answers on retry — " +
         "or try a different public video.\n\n" +
-        "🔧 Admin: for reliable downloads, self-host Cobalt (ghcr.io/imputnet/cobalt) and set COBALT_API_URL."
+        "🔧 Admin: for reliable downloads, self-host Cobalt (ghcr.io/imputnet/cobalt) and set COBALT_API_URL." +
+        ytdlpHint
     );
   }
   return new Error(
@@ -135,6 +145,7 @@ function buildYouTubeError(androidWalled = false, ytdlpWalled = false): Error {
       "Please try again in a few minutes or try a different public video — " +
       "age-restricted/private videos are hidden from anonymous services and can't be downloaded.\n\n" +
       "🔧 Admin: check the Render logs for the per-method errors " +
-      "(`⚠️ Piped … failed` / `⚠️ YouTube yt-dlp … failed`), or self-host Cobalt (ghcr.io/imputnet/cobalt) and set COBALT_API_URL for max reliability."
+      "(`⚠️ Piped … failed` / `⚠️ YouTube yt-dlp … failed`), or self-host Cobalt (ghcr.io/imputnet/cobalt) and set COBALT_API_URL for max reliability." +
+      ytdlpHint
   );
 }

@@ -48,11 +48,16 @@ function hasNodeRuntime(): boolean {
 let _impersonate: boolean | null = null;
 function supportsImpersonate(): boolean {
   if (_impersonate === null) {
-    try {
-      execSync(`"${config.ytDlpPath}" --impersonate chrome --version`, { stdio: "ignore" });
-      _impersonate = true;
-    } catch {
+    const bin = resolveYtDlpPath();
+    if (!bin) {
       _impersonate = false;
+    } else {
+      try {
+        execSync(`"${bin}" --impersonate chrome --version`, { stdio: "ignore" });
+        _impersonate = true;
+      } catch {
+        _impersonate = false;
+      }
     }
   }
   return _impersonate;
@@ -71,17 +76,41 @@ function hasAria2c(): boolean {
   return _aria2c;
 }
 
-let _ytDlp: boolean | null = null;
-function ytDlpAvailable(): boolean {
-  if (_ytDlp === null) {
+/**
+ * Resolve the yt-dlp binary: explicit YT_DLP_PATH first, then a copy shipped
+ * next to the bot (./yt-dlp.exe on Windows, ./yt-dlp elsewhere — the repo
+ * root on a local PC, or the ffmpeg dir), then PATH lookup. Cached.
+ * Returns "" when nothing works (caller skips with a clear warning).
+ */
+let _resolvedYtDlp: string | null = null;
+function resolveYtDlpPath(): string {
+  if (_resolvedYtDlp !== null) return _resolvedYtDlp;
+  const exe = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+  const candidates: string[] = [
+    config.ytDlpPath,
+    path.join(process.cwd(), exe),
+    path.join(config.ffmpegDir, exe),
+  ];
+  for (const c of candidates) {
     try {
-      execSync(`"${config.ytDlpPath}" --version`, { stdio: "ignore" });
-      _ytDlp = true;
-    } catch {
-      _ytDlp = false;
-    }
+      execSync(`"${c}" --version`, { stdio: "ignore" });
+      _resolvedYtDlp = c;
+      if (c !== config.ytDlpPath) console.log(`🔧 YouTube yt-dlp fallback: YT_DLP_PATH unusable, using binary at ${c}`);
+      return _resolvedYtDlp;
+    } catch {}
   }
-  return _ytDlp;
+  _resolvedYtDlp = "";
+  return _resolvedYtDlp;
+}
+
+function ytDlpAvailable(): boolean {
+  return resolveYtDlpPath().length > 0;
+}
+
+/** Why the fallback would/wouldn't run — surfaced in the final error for the admin. */
+export function ytDlpFallbackStatus(): "ready" | "disabled" | "missing" {
+  if (!config.youtubeYtdlpFallback) return "disabled";
+  return ytDlpAvailable() ? "ready" : "missing";
 }
 
 /** Any cookie source configured (browser / env / usable file)? */
@@ -202,7 +231,7 @@ function isBotCheck(msg: string): boolean {
 
 function runYtDlpAttempt(args: string[], onProgress?: (p: DownloadProgress) => void): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(config.ytDlpPath, args, { shell: false });
+    const proc = spawn(resolveYtDlpPath(), args, { shell: false });
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (d: Buffer) => {
@@ -274,7 +303,10 @@ export async function downloadYouTubeViaYtDlp(
 ): Promise<DownloadResult | null> {
   if (!config.youtubeYtdlpFallback) return null;
   if (!ytDlpAvailable()) {
-    console.warn(`⚠️ YouTube yt-dlp fallback skipped: binary not found at "${config.ytDlpPath}"`);
+    console.warn(
+      `⚠️ YouTube yt-dlp fallback skipped: no working binary (tried YT_DLP_PATH="${config.ytDlpPath}" + local copy). ` +
+        `Set YT_DLP_PATH to the yt-dlp binary (Render installs it via build.sh; locally place yt-dlp.exe next to the bot).`
+    );
     return null;
   }
   if (!fs.existsSync(config.downloadDir)) fs.mkdirSync(config.downloadDir, { recursive: true });
