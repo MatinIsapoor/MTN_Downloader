@@ -183,6 +183,25 @@ function pinTitle(data: any, pinId: string | null): string {
   return pinId ? `pinterest_${pinId}` : "pinterest";
 }
 
+/** True when any story-pin page holds a block with a video URL (mp4 or HLS). */
+function storyHasVideo(data: any): boolean {
+  const pages = data?.story_pin_data?.pages;
+  if (!Array.isArray(pages)) return false;
+  for (const p of pages) {
+    const blocks = (p as any)?.blocks;
+    if (!Array.isArray(blocks)) continue;
+    for (const b of blocks) {
+      const list = (b as any)?.video?.video_list;
+      if (!list || typeof list !== "object") continue;
+      for (const f of Object.values<any>(list)) {
+        const u = (f as any)?.url;
+        if (typeof u === "string" && /^https?:\/\//i.test(u)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** True when the API metadata describes a video pin (even if no mp4 was listed). */
 function looksLikeVideoPin(data: any, mp4Count: number): boolean {
   return Boolean(
@@ -190,7 +209,7 @@ function looksLikeVideoPin(data: any, mp4Count: number): boolean {
       data?.is_video ||
       data?.is_playable ||
       data?.videos ||
-      data?.story_pin_data ||
+      storyHasVideo(data) ||
       (data?.domain && String(data.domain).toLowerCase() !== "uploaded by user" && data?.embed?.src)
   );
 }
@@ -312,7 +331,7 @@ export async function downloadPinterest(
     return { filePath, fileName, title: base, ext: "mp4", size: stat.size, platform: "pinterest" };
   };
 
-  const saveImage = async (imageUrl: string, base: string): Promise<DownloadResult> => {
+  const saveImage = async (imageUrl: string, base: string, confident: boolean): Promise<DownloadResult> => {
     const id = crypto.randomBytes(6).toString("hex");
     const ext = extFromUrl(imageUrl, "jpg");
     const fileName = `${id}_${base}.${ext}`;
@@ -325,7 +344,7 @@ export async function downloadPinterest(
       throw new Error("❌ Pinterest returned an empty file. Try another pin.");
     }
     console.log(`✅ Pinterest saved: ${fileName} (${(stat.size / 1048576).toFixed(1)} MB)`);
-    return { filePath, fileName, title: base, ext, size: stat.size, platform: "pinterest" };
+    return { filePath, fileName, title: base, ext, size: stat.size, platform: "pinterest", confidentImage: confident };
   };
 
   // --- 1) Video via PinResource API (most reliable) -------------------------
@@ -340,10 +359,11 @@ export async function downloadPinterest(
     }
     if (data) {
       const base = sanitizeFileName(decodeHtmlEntities(pinTitle(data, pinId)).replace(/\s*\|\s*Pinterest\s*$/i, ""));
-      const best = pickBestMp4(collectMp4Candidates(data));
+      const mp4Candidates = collectMp4Candidates(data);
+      const best = pickBestMp4(mp4Candidates);
       if (best) return saveVideo(best, base);
 
-      if (looksLikeVideoPin(data, 0)) {
+      if (looksLikeVideoPin(data, mp4Candidates.length)) {
         // Video pin, but no progressive mp4 (HLS-only rendition or an
         // external YouTube/Vimeo embed): yt-dlp knows how to handle these,
         // so fall through to it instead of returning the cover thumbnail.
@@ -354,7 +374,7 @@ export async function downloadPinterest(
         try {
           const cover = pickApiImage(data);
           if (cover && !/default|avatar|logo/i.test(cover)) {
-            coverFallback = await saveImage(cover, base);
+            coverFallback = await saveImage(cover, base, false);
           }
         } catch {}
         const err: any = new Error(
@@ -366,7 +386,8 @@ export async function downloadPinterest(
 
       const apiImage = pickApiImage(data);
       if (apiImage && !/default|avatar|logo/i.test(apiImage)) {
-        return saveImage(apiImage, base);
+        // API verified: pin has no video — a genuine image pin.
+        return saveImage(apiImage, base, true);
       }
       // No video, no usable API image — fall through to page scrape below.
     }
@@ -429,11 +450,12 @@ export async function downloadPinterest(
   }
 
   // --- 3) Image pin fallback (og:image) -------------------------------------
-  // Only reached when the API path above did NOT classify this pin as video,
-  // so returning the image here is correct (genuine image pin).
+  // Reached when the API was unavailable or had no usable image. The pin may
+  // still be a video (API hiccup), so this image is NOT marked confident —
+  // the caller runs the video pipeline before accepting it.
   const imageUrl = pickMeta(html, "og:image:secure_url") || pickMeta(html, "og:image");
   if (imageUrl && !/default|avatar|logo/i.test(imageUrl)) {
-    return saveImage(imageUrl, base);
+    return saveImage(imageUrl, base, false);
   }
 
   throw new Error(

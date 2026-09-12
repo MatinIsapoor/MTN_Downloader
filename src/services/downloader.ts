@@ -15,6 +15,12 @@ export interface DownloadResult {
   ext: string;
   size: number;
   platform: string;
+  /**
+   * Set for Pinterest image results that are verified image pins (API says
+   * the pin has no video). The caller can return these immediately without
+   * running the video pipeline.
+   */
+  confidentImage?: boolean;
 }
 
 export interface AudioResult {
@@ -876,15 +882,20 @@ export async function downloadVideo(
   }
 
   // --- Pinterest: direct scraping first (no login/cookies needed) -----------
-  // NOTE: a direct result that is only an IMAGE is kept as a fallback while
-  // the video pipeline (Cobalt → yt-dlp) still runs — video pins used to be
-  // mis-saved as their cover thumbnail when video extraction missed.
+  // NOTE: an UNCERTAIN image result is kept as a fallback while the video
+  // pipeline (Cobalt → yt-dlp) still runs — video pins used to be mis-saved
+  // as their cover thumbnail when video extraction missed. API-verified image
+  // pins (confidentImage) return immediately with no yt-dlp round-trip.
   let pinterestImageFallback: DownloadResult | null = null;
   if (platform === "pinterest") {
     try {
       console.log("📌 Trying direct Pinterest download…");
       const direct = await downloadPinterest(url, onProgress);
       if (direct.ext.toLowerCase() === "mp4") return direct;
+      if (direct.confidentImage) {
+        console.log("📌 Pinterest image pin — returning image directly.");
+        return direct;
+      }
       console.log("📌 Direct Pinterest returned an image — trying video methods before accepting it…");
       pinterestImageFallback = direct;
     } catch (err: any) {
@@ -981,7 +992,16 @@ export async function downloadVideo(
       allErrors.push(`[${attempt.name}] ${lastError}`);
       console.warn(`⚠️ ${platform} strategy "${attempt.name}" failed: ${lastError.slice(0, 200)}`);
       // Fatal errors (private/deleted/too large/unsupported) won't be fixed by another strategy.
-      if (isFatalError(lastError)) throw mapDownloadError(lastError, platform);
+      // Exception: a saved Pinterest image still beats an error — e.g. yt-dlp
+      // reports "Requested format is not available" for image-only pins that
+      // have no video formats at all.
+      if (isFatalError(lastError)) {
+        if (pinterestImageFallback) {
+          console.log(`📌 Pinterest video unavailable (${lastError.slice(0, 80)}) — returning image fallback: ${pinterestImageFallback.fileName}`);
+          return pinterestImageFallback;
+        }
+        throw mapDownloadError(lastError, platform);
+      }
     }
   }
 
