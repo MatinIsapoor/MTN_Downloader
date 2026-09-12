@@ -876,11 +876,24 @@ export async function downloadVideo(
   }
 
   // --- Pinterest: direct scraping first (no login/cookies needed) -----------
+  // NOTE: a direct result that is only an IMAGE is kept as a fallback while
+  // the video pipeline (Cobalt → yt-dlp) still runs — video pins used to be
+  // mis-saved as their cover thumbnail when video extraction missed.
+  let pinterestImageFallback: DownloadResult | null = null;
   if (platform === "pinterest") {
     try {
       console.log("📌 Trying direct Pinterest download…");
-      return await downloadPinterest(url, onProgress);
+      const direct = await downloadPinterest(url, onProgress);
+      if (direct.ext.toLowerCase() === "mp4") return direct;
+      console.log("📌 Direct Pinterest returned an image — trying video methods before accepting it…");
+      pinterestImageFallback = direct;
     } catch (err: any) {
+      // HLS-only / external-embed pins: direct download saved the cover image
+      // and attached it — keep it while yt-dlp tries for the real video.
+      if (err?.pinterestImageFallback) {
+        console.log("📌 Pinterest video needs yt-dlp — cover image kept as fallback…");
+        pinterestImageFallback = err.pinterestImageFallback;
+      }
       // Definitive failures (gone/private/too large): don't waste time on yt-dlp.
       if (err?.message?.startsWith("❌")) {
         const msg = String(err.message);
@@ -888,7 +901,7 @@ export async function downloadVideo(
       }
       console.warn(`⚠️ Pinterest direct failed, falling back to yt-dlp: ${(err?.message || String(err)).slice(0, 150)}`);
     }
-    // …fall through to the yt-dlp fallback below.
+    // …fall through to the video pipeline below.
   }
 
   // --- Fast path: Cobalt API (TikTok/X/Instagram/Pinterest fallback).
@@ -898,7 +911,13 @@ export async function downloadVideo(
     try {
       console.log(`⚡ Trying fast path: Cobalt (${platform})…`);
       const fast = await downloadViaCobalt(url, platform, onProgress);
-      if (fast) return fast;
+      if (fast) {
+        if (pinterestImageFallback && pinterestImageFallback.filePath !== fast.filePath) {
+          try { fs.unlinkSync(pinterestImageFallback.filePath); } catch {}
+          pinterestImageFallback = null;
+        }
+        return fast;
+      }
     } catch (err: any) {
       if (err?.message?.startsWith("❌")) throw err; // definitive (gone/too large)
       console.warn(`⚠️ Cobalt fast path failed, continuing: ${(err?.message || String(err)).slice(0, 150)}`);
@@ -951,7 +970,12 @@ export async function downloadVideo(
           `⏳ Trying ${platform} strategy: ${attempt.name}${attempt.useCookies ? " (cookies)" : " (no cookies)"}…`
         );
       const stdout = await runYtDlpAttempt(args, onProgress);
-      return resolveDownloadedFile(stdout, id, platform);
+      const resolved = resolveDownloadedFile(stdout, id, platform);
+      if (pinterestImageFallback && pinterestImageFallback.filePath !== resolved.filePath) {
+        try { fs.unlinkSync(pinterestImageFallback.filePath); } catch {}
+        pinterestImageFallback = null;
+      }
+      return resolved;
     } catch (err: any) {
       lastError = err?.message || String(err);
       allErrors.push(`[${attempt.name}] ${lastError}`);
@@ -970,6 +994,14 @@ export async function downloadVideo(
       const msg = fallbackErr?.message || "";
       if (msg.startsWith("❌")) throw fallbackErr;
     }
+  }
+
+  // Pinterest: video pipeline failed, but direct scraping already saved the
+  // pin's image — return that instead of an error (genuine image pins, or
+  // video pins whose video is unreachable everywhere).
+  if (pinterestImageFallback) {
+    console.log(`📌 Pinterest video unavailable — returning image fallback: ${pinterestImageFallback.fileName}`);
+    return pinterestImageFallback;
   }
 
   // Diagnose from the combined output of ALL attempts, not just the last one:
