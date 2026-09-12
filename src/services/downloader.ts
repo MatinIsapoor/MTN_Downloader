@@ -375,6 +375,11 @@ export function logDownloaderDiagnostics(): void {
       ? "🔧 Downloader: aria2c available (8-connection fast downloads enabled)"
       : "🔧 Downloader: native (install aria2c for faster progressive-mp4 downloads)"
   );
+  console.log(
+    getFfmpegVersion()
+      ? `🔧 ffmpeg: available (${getFfmpegVersion()}, HLS merge enabled)`
+      : "⚠️ ffmpeg: NOT FOUND — HLS-only Pinterest videos will fall back to cover images (build.sh installs a static build on Linux)"
+  );
   if (config.ytDlpProxy) console.log("🔧 Proxy: YT_DLP_PROXY is set (YouTube traffic routed via proxy)");
   else if (process.env.RENDER_EXTERNAL_URL || process.env.RENDER)
     console.log("🔧 Proxy: none (datacenter IP — if YouTube hard-blocks it, set YT_DLP_PROXY to a residential proxy)");
@@ -405,7 +410,7 @@ function hasAria2c(): boolean {
 }
 
 /** Extra yt-dlp args derived from local capabilities: auth cookies + JS runtime. */
-function buildCommonArgs(useCookies = true): string[] {
+function buildCommonArgs(useCookies = true, chunked = true): string[] {
   const args: string[] = [];
   const cookieMode = config.youtubeCookieMode;
   const wantCookies = useCookies && cookieMode !== "never";
@@ -435,15 +440,18 @@ function buildCommonArgs(useCookies = true): string[] {
   // Speed: chunked HTTP bypasses per-connection throttling on progressive mp4s;
   // parallel fragments help DASH/HLS; short timeouts + few retries fail over
   // to the next player client fast instead of stalling on a blocked one.
+  // NOTE: chunking is opt-out per attempt — v1.pinimg.com answers ranged
+  // requests to small HLS segments with garbage ("Conflicting range"), so
+  // Pinterest runs unchunked.
   args.push(
     "--concurrent-fragments", "8",
-    "--http-chunk-size", "10M",
     "--buffer-size", "16K",
     "--socket-timeout", "10",
     "--retries", "3",
     "--fragment-retries", "3",
     "--no-check-certificates"
   );
+  if (chunked) args.push("--http-chunk-size", "10M");
   // aria2c (8 connections) is far faster than the native downloader for
   // progressive http mp4s, when it is installed. Probe once, use if present.
   if (hasAria2c()) {
@@ -462,6 +470,8 @@ interface AttemptSpec {
   extraArgs: string[];
   /** false = run WITHOUT any cookies (anonymous clients that ignore/reject them). */
   useCookies: boolean;
+  /** false = skip --http-chunk-size (breaks small HLS segments on some hosts). */
+  chunked?: boolean;
 }
 
 /**
@@ -491,8 +501,15 @@ function attemptsFor(platform: string): AttemptSpec[] {
     attempts.push({ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true });
     return attempts;
   }
-  if (platform === "instagram" || platform === "twitter" || platform === "pinterest") {
+  if (platform === "instagram" || platform === "twitter") {
     return [{ name: "default", extraArgs: ["-f", "b[ext=mp4]/b"], useCookies: true }];
+  }
+  if (platform === "pinterest") {
+    // Progressive MP4 first (single file, no merge). HLS-only story pins
+    // expose split video-only/audio-only tracks, so fall back to a merge
+    // (needs ffmpeg — installed at build time, see build.sh). Unchunked:
+    // ranged requests break v1.pinimg.com HLS segment downloads.
+    return [{ name: "default", extraArgs: ["-f", "b[ext=mp4]/bv*+ba/b"], useCookies: true, chunked: false }];
   }
   return [{ name: "default", extraArgs: ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"], useCookies: true }];
 }
@@ -969,7 +986,7 @@ export async function downloadVideo(
     // cookies+tv can even invalidate the saved session).
     const args = [
       ...baseArgs,
-      ...buildCommonArgs(attempt.useCookies),
+      ...buildCommonArgs(attempt.useCookies, attempt.chunked !== false),
       ...attempt.extraArgs,
       "--print",
       "after_move:filepath",
@@ -1035,6 +1052,19 @@ export function cleanupFile(filePath: string): void {
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   } catch {}
+}
+
+/** ffmpeg version string when the binary runs, else null. Cached. */
+let _ffmpegVersion: string | null | undefined;
+export function getFfmpegVersion(): string | null {
+  if (_ffmpegVersion !== undefined) return _ffmpegVersion;
+  try {
+    const out = execSync(`"${getFfmpegBinary()}" -version`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    _ffmpegVersion = out.split("\n")[0].replace(/^ffmpeg version\s+/, "").split(/\s+/)[0] || "unknown";
+  } catch {
+    _ffmpegVersion = null;
+  }
+  return _ffmpegVersion;
 }
 
 /** Resolve the ffmpeg binary: explicit FFMPEG_PATH file > local dir binary > PATH. */
