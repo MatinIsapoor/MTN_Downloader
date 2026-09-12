@@ -908,7 +908,7 @@ export async function downloadVideo(
     try {
       console.log("📌 Trying direct Pinterest download…");
       const direct = await downloadPinterest(url, onProgress);
-      if (direct.ext.toLowerCase() === "mp4") return direct;
+      if (direct.ext.toLowerCase() === "mp4") return normalizePinterestMp4(direct);
       if (direct.confidentImage) {
         console.log("📌 Pinterest image pin — returning image directly.");
         return direct;
@@ -944,6 +944,7 @@ export async function downloadVideo(
           try { fs.unlinkSync(pinterestImageFallback.filePath); } catch {}
           pinterestImageFallback = null;
         }
+        if (platform === "pinterest" && fast.ext.toLowerCase() === "mp4") return normalizePinterestMp4(fast);
         return fast;
       }
     } catch (err: any) {
@@ -1003,6 +1004,7 @@ export async function downloadVideo(
         try { fs.unlinkSync(pinterestImageFallback.filePath); } catch {}
         pinterestImageFallback = null;
       }
+      if (platform === "pinterest" && resolved.ext.toLowerCase() === "mp4") return normalizePinterestMp4(resolved);
       return resolved;
     } catch (err: any) {
       lastError = err?.message || String(err);
@@ -1052,6 +1054,50 @@ export function cleanupFile(filePath: string): void {
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   } catch {}
+}
+
+/**
+ * Normalize a Pinterest MP4 for maximum player compatibility.
+ *
+ * Pinterest files (direct progressive MP4s and HLS merges) can carry
+ * timestamp quirks that make strict players show a black/frozen picture
+ * while the audio keeps playing. A fast stream-copy remux (no re-encode)
+ * rebuilds timestamps and puts moov first. It also re-validates the file:
+ * ffmpeg fails loudly on corrupt input. Never throws — returns the original
+ * result on any failure (missing ffmpeg included).
+ */
+async function normalizePinterestMp4(result: DownloadResult): Promise<DownloadResult> {
+  if (getFfmpegVersion() === null) return result;
+  const fixedPath = result.filePath.replace(/\.mp4$/i, "") + "_norm.mp4";
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(
+        getFfmpegBinary(),
+        [
+          "-y", "-v", "error",
+          "-fflags", "+genpts",
+          "-i", result.filePath,
+          "-c", "copy", "-map", "0",
+          "-movflags", "+faststart",
+          fixedPath,
+        ],
+        { shell: false }
+      );
+      let err = "";
+      proc.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+      proc.on("error", reject);
+      proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err.slice(-300) || `ffmpeg exit ${code}`))));
+    });
+    const stat = fs.statSync(fixedPath);
+    if (stat.size === 0) throw new Error("empty remux output");
+    try { fs.unlinkSync(result.filePath); } catch {}
+    console.log(`📌 Pinterest MP4 normalized for playback: ${path.basename(fixedPath)} (${(stat.size / 1048576).toFixed(1)} MB)`);
+    return { ...result, filePath: fixedPath, fileName: path.basename(fixedPath), size: stat.size };
+  } catch (err: any) {
+    try { if (fs.existsSync(fixedPath)) fs.unlinkSync(fixedPath); } catch {}
+    console.warn(`⚠️ Pinterest normalize skipped, sending original: ${(err?.message || String(err)).slice(0, 130)}`);
+    return result;
+  }
 }
 
 /** ffmpeg version string when the binary runs, else null. Cached. */
